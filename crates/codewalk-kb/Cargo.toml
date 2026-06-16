@@ -1,0 +1,10 @@
+[package]
+name = "codewalk-kb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Mode-2 learned-intelligence layer: embeddings · KB store · RRF fusion · transcript capture. Depends on codegraph-core, never the reverse."
+
+[dependencies]
+codegraph-core.workspace = true

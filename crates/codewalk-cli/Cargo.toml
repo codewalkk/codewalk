@@ -1,0 +1,16 @@
+[package]
+name = "codewalk-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "`codewalk` binary (mode 2): codegraph-core + codewalk-kb. Adds learned MCP tools, `update`, and `install` (local scope). Degrades to structural on a KB miss."
+
+[[bin]]
+name = "codewalk"
+path = "src/main.rs"
+
+[dependencies]
+codegraph-core.workspace = true
+codewalk-kb = { path = "../codewalk-kb" }
+anyhow.workspace = true
