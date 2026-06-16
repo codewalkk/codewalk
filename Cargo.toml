@@ -1,0 +1,48 @@
+# codewalk_rust — Cargo workspace root.
+#
+# Two modes map to two binaries (see docs/rust-build-plan.md §1, §4):
+#   codegraph (mode 1) = codegraph-core only         → codegraph_rust/*
+#   codewalk  (mode 2) = core + codewalk-kb          → crates/*
+#
+# The codegraph engine — the reusable structural moat — lives under
+# codegraph_rust/ (it is the "module for codewalk_rust" the kickoff calls for).
+# The learned-intelligence layer (mode 2) lives under crates/.
+[workspace]
+resolver = "2"
+members = [
+    "codegraph_rust/codegraph-core",
+    "codegraph_rust/codegraph-cli",
+    "codegraph_rust/codegraph-node",
+    "crates/codewalk-kb",
+    "crates/codewalk-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+# Pinned shared dependencies. tree-sitter ↔ grammar ABI skew is a known risk
+# (docs/rust-build-plan.md §7) — pin both here and smoke-test each grammar.
+[workspace.dependencies]
+codegraph-core = { path = "codegraph_rust/codegraph-core" }
+# `bundled` statically links SQLite with FTS5 compiled in (libsqlite3-sys sets
+# SQLITE_ENABLE_FTS5) — there is no separate `fts5` feature. The M0 test proves
+# the fts5 module is present. This is the property that kills the FTS5 cliff.
+rusqlite = { version = "0.40", features = ["bundled"] }
+tree-sitter = "0.25"
+tree-sitter-go = "0.25"
+ignore = "0.4"
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+walkdir = "2"
+regex = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

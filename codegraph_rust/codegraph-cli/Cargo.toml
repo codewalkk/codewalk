@@ -1,0 +1,17 @@
+[package]
+name = "codegraph-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "`codegraph` binary (mode 1): structural index/query/serve. Links codegraph-core only — single static binary, no model/LLM/network."
+
+[[bin]]
+name = "codegraph"
+path = "src/main.rs"
+
+[dependencies]
+codegraph-core.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true

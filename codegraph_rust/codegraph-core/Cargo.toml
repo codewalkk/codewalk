@@ -1,0 +1,22 @@
+[package]
+name = "codegraph-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Structural code-intelligence engine: extraction · db · resolution · graph · context. The reusable moat (mode-agnostic; no embeddings/LLM/network)."
+
+[dependencies]
+rusqlite.workspace = true
+tree-sitter.workspace = true
+tree-sitter-go.workspace = true
+ignore.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+anyhow.workspace = true
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
