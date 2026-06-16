@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     decorators TEXT, -- JSON array
     type_parameters TEXT, -- JSON array
     return_type TEXT, -- normalized return/result type name (for receiver-type inference)
+    name_split TEXT, -- camelCase/snake pre-split of `name` (CBM cbm_camel_split): getUserById → "get user by id". Feeds FTS so a query term `user` matches.
     updated_at INTEGER NOT NULL
 );
 
@@ -100,26 +101,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     qualified_name,
     docstring,
     signature,
+    name_split,
     content='nodes',
     content_rowid='rowid'
 );
 
 -- Triggers to keep FTS index in sync
 CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
-    INSERT INTO nodes_fts(rowid, id, name, qualified_name, docstring, signature)
-    VALUES (NEW.rowid, NEW.id, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature);
+    INSERT INTO nodes_fts(rowid, id, name, qualified_name, docstring, signature, name_split)
+    VALUES (NEW.rowid, NEW.id, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature, NEW.name_split);
 END;
 
 CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
-    INSERT INTO nodes_fts(nodes_fts, rowid, id, name, qualified_name, docstring, signature)
-    VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature);
+    INSERT INTO nodes_fts(nodes_fts, rowid, id, name, qualified_name, docstring, signature, name_split)
+    VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature, OLD.name_split);
 END;
 
 CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
-    INSERT INTO nodes_fts(nodes_fts, rowid, id, name, qualified_name, docstring, signature)
-    VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature);
-    INSERT INTO nodes_fts(rowid, id, name, qualified_name, docstring, signature)
-    VALUES (NEW.rowid, NEW.id, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature);
+    INSERT INTO nodes_fts(nodes_fts, rowid, id, name, qualified_name, docstring, signature, name_split)
+    VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature, OLD.name_split);
+    INSERT INTO nodes_fts(rowid, id, name, qualified_name, docstring, signature, name_split)
+    VALUES (NEW.rowid, NEW.id, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature, NEW.name_split);
 END;
 
 -- Edge indexes.

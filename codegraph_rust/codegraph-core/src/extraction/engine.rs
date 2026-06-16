@@ -17,6 +17,16 @@ use crate::types::{
 };
 use tree_sitter::{Node as TsNode, Parser};
 
+/// Built-in/primitive type names that shouldn't create `references`
+/// (port of TS `BUILTIN_TYPES`, the Go-relevant + shared entries).
+const BUILTIN_TYPES: &[&str] = &[
+    "string", "number", "boolean", "void", "null", "undefined", "never", "any", "object", "symbol",
+    "bigint", "true", "false", "str", "bool", "i8", "i16", "i32", "i64", "i128", "isize", "u8",
+    "u16", "u32", "u64", "u128", "usize", "f32", "f64", "char", "int", "long", "short", "byte",
+    "float", "double", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32",
+    "uint64", "uintptr", "float32", "float64", "complex64", "complex128", "rune", "error",
+];
+
 /// Constructor-invocation node kinds (TS `INSTANTIATION_KINDS`, Go-relevant
 /// subset). Go composite literals `Widget{…}` / `pkga.Widget{…}`.
 const INSTANTIATION_KINDS: &[&str] = &[
@@ -311,6 +321,7 @@ impl<'a> Engine<'a> {
         let Some(id) = self.create_node(NodeKind::Function, &name, node, extra) else {
             return;
         };
+        self.extract_type_annotations(node, &id);
         self.push_scope(id.clone(), NodeKind::Function, name);
         if let Some(body) = child_by_field(node, ex.body_field()) {
             self.visit_function_body(body);
@@ -361,6 +372,7 @@ impl<'a> Engine<'a> {
             }
         }
 
+        self.extract_type_annotations(node, &id);
         self.push_scope(id.clone(), NodeKind::Method, name);
         if let Some(body) = child_by_field(node, ex.body_field()) {
             self.visit_function_body(body);
@@ -794,9 +806,19 @@ impl<'a> Engine<'a> {
         );
     }
 
-    /// Inheritance/embedding → `extends`/`implements` unresolved refs (Go subset:
-    /// interface embedding `constraint_elem`, struct embedding `field_declaration`
-    /// without a field name).
+    /// Inheritance/embedding → `extends` unresolved refs (faithful port of the TS
+    /// `extractInheritance` Go branches: `constraint_elem` interface embedding,
+    /// `field_declaration` struct embedding without a field name).
+    ///
+    /// GRAMMAR-SKEW NOTE (docs/rust-build-plan.md §7): the TS build used an older
+    /// tree-sitter-go that exposed struct fields as direct `field_declaration`
+    /// children and interface embeddings as `constraint_elem`. The 0.25 crate nests
+    /// fields under `field_declaration_list` and uses `type_elem` for interface
+    /// type-sets — so descending those shapes OVER-captures vs the TS reference
+    /// (extends 340%, cascading into the interface-override synthesizer → calls
+    /// 110%). We deliberately keep the TS port verbatim (extends ≈ the TS shape on
+    /// this grammar) for parity; richer Go embedding coverage is a separate,
+    /// benchmark-gated change, not a parity port.
     fn extract_inheritance(&mut self, node: TsNode<'_>, class_id: &str) {
         for i in 0..node.named_child_count() {
             let Some(child) = node.named_child(i) else {
@@ -809,12 +831,7 @@ impl<'a> Engine<'a> {
                         .find(|c| c.kind() == "type_identifier")
                     {
                         let name = node_text(tid, self.source).to_string();
-                        self.add_unresolved(
-                            class_id,
-                            &name,
-                            ReferenceKind::Edge(EdgeKind::Extends),
-                            tid,
-                        );
+                        self.add_unresolved(class_id, &name, ReferenceKind::Edge(EdgeKind::Extends), tid);
                     }
                 }
                 "field_declaration" => {
@@ -827,16 +844,47 @@ impl<'a> Engine<'a> {
                             .find(|c| c.kind() == "type_identifier")
                         {
                             let name = node_text(tid, self.source).to_string();
-                            self.add_unresolved(
-                                class_id,
-                                &name,
-                                ReferenceKind::Edge(EdgeKind::Extends),
-                                tid,
-                            );
+                            self.add_unresolved(class_id, &name, ReferenceKind::Edge(EdgeKind::Extends), tid);
                         }
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Emit `references` refs for the types named in a function/method's
+    /// parameter and result positions (TS `extractTypeAnnotations`, Go path).
+    fn extract_type_annotations(&mut self, node: TsNode<'_>, from_id: &str) {
+        if self.language != Language::Go {
+            return;
+        }
+        if let Some(params) = child_by_field(node, "parameters") {
+            self.extract_type_refs_from_subtree(params, from_id);
+        }
+        if let Some(result) = child_by_field(node, "result") {
+            self.extract_type_refs_from_subtree(result, from_id);
+        }
+    }
+
+    /// Recurse a type-position subtree, emitting a `references` ref per non-builtin
+    /// `type_identifier` leaf (TS `extractTypeRefsFromSubtree`).
+    fn extract_type_refs_from_subtree(&mut self, node: TsNode<'_>, from_id: &str) {
+        if node.kind() == "type_identifier" {
+            let type_name = node_text(node, self.source);
+            if !type_name.is_empty() && !BUILTIN_TYPES.contains(&type_name) {
+                self.add_unresolved(
+                    from_id,
+                    &type_name.to_string(),
+                    ReferenceKind::Edge(EdgeKind::References),
+                    node,
+                );
+            }
+            return; // type_identifier is a leaf
+        }
+        for i in 0..node.named_child_count() {
+            if let Some(child) = node.named_child(i) {
+                self.extract_type_refs_from_subtree(child, from_id);
             }
         }
     }

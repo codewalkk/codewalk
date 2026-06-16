@@ -15,3 +15,7 @@ codegraph-core.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
+rmcp.workspace = true
+tokio.workspace = true
+schemars.workspace = true
+serde = { workspace = true }
