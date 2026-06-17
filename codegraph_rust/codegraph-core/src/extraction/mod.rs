@@ -192,5 +192,6 @@ pub fn ported_languages() -> &'static [Language] {
         Language::Javascript,
         Language::Jsx,
         Language::Python,
+        Language::Rust,
     ]
 }

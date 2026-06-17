@@ -194,6 +194,8 @@ impl<'a> Engine<'a> {
         } else if ex.variable_types().contains(&kind) && !self.is_inside_class_like() {
             self.extract_variable(node);
             skip_children = true;
+        } else if ex.enum_member_types().contains(&kind) && self.is_inside_enum() {
+            self.extract_enum_member(node);
         } else if ex.import_types().contains(&kind) {
             self.extract_import(node);
         } else if ex.call_types().contains(&kind) {
@@ -265,6 +267,23 @@ impl<'a> Engine<'a> {
             .collect();
         parts.push(name);
         parts.join("::")
+    }
+
+    fn is_inside_enum(&self) -> bool {
+        self.scopes.last().map(|s| s.kind) == Some(NodeKind::Enum)
+    }
+
+    /// An enum variant → an `enum_member` node (Rust `enum_variant`).
+    fn extract_enum_member(&mut self, node: TsNode<'_>) {
+        let name = extract_name(node, self.source, self.extractor);
+        if name == "<anonymous>" || name.is_empty() {
+            return;
+        }
+        let extra = NodeExtra {
+            docstring: preceding_docstring(node, self.source),
+            ..Default::default()
+        };
+        self.create_node(NodeKind::EnumMember, &name, node, extra);
     }
 
     fn is_inside_class_like(&self) -> bool {
@@ -761,6 +780,28 @@ impl<'a> Engine<'a> {
         self.create_node(NodeKind::Variable, &name, node, extra);
     }
 
+    /// Rust `const`/`static` (→ constant) and top-level `let` (→ variable).
+    fn extract_variable_rust(&mut self, node: TsNode<'_>) {
+        let name_node = child_by_field(node, "name").or_else(|| child_by_field(node, "pattern"));
+        let Some(nn) = name_node else { return };
+        if nn.kind() != "identifier" {
+            return; // skip destructuring let-patterns
+        }
+        let name = node_text(nn, self.source).to_string();
+        // The TS rust extractor defines no `isConst`, so `const`/`static`/`let`
+        // all extract as `variable` — match it for parity (PORT, don't invent).
+        let kind = NodeKind::Variable;
+        let signature = child_by_field(node, "value")
+            .map(|v| format!("= {}", truncate(node_text(v, self.source), 100)));
+        let extra = NodeExtra {
+            docstring: preceding_docstring(node, self.source),
+            signature,
+            is_exported: self.extractor.is_exported(node, self.source),
+            ..Default::default()
+        };
+        self.create_node(kind, &name, node, extra);
+    }
+
     /// Go variable/const declarations (var/const specs + `:=`).
     fn extract_variable(&mut self, node: TsNode<'_>) {
         if matches!(
@@ -772,6 +813,10 @@ impl<'a> Engine<'a> {
         }
         if self.language == Language::Python {
             self.extract_variable_py(node);
+            return;
+        }
+        if self.language == Language::Rust {
+            self.extract_variable_rust(node);
             return;
         }
         let docstring = preceding_docstring(node, self.source);
