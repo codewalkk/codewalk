@@ -329,8 +329,24 @@ banner above).
 > references (Python types are `identifier`, not `type_identifier`) — the same
 > resolution follow-on. **Go re-verified: exactly 167,101 Go nodes** (the k8s total
 > rose +16 only because the new extractor now picks up k8s's stray Python tooling
-> files — multi-language coverage on a mixed repo, not a Go change). Next: Rust
-> extractor, then the resolution-completeness pass (imports/type-refs) across TS+Python.
+> files — multi-language coverage on a mixed repo, not a Go change).
+>
+> **M4d done: Rust extractor.** `languages/rust.rs` + engine handling: impl-method
+> receivers (`get_receiver_type` walks to the enclosing `impl`), enum variants
+> (`enum_member` dispatch), `const`/`static`/`let` variables, `use`-tree root-module
+> imports, normalized return types for chained-receiver inference. Grammar
+> `tree-sitter-rust` 0.24 (ABI-compatible). **Parity on codegraph-core/src (26 Rust
+> files): nodes 634 vs 628 (101.0%, within ±5%)** — method 220✓ function 142✓
+> enum_member 80✓ struct 26✓ enum 8✓ trait 1✓ variable 22✓ all exact (import +6).
+> Edges 1,802 vs 1,962 (92%): **references 97%, instantiates EXACT (84/84)**, calls
+> 97%, contains exact — Rust's typed AST means type refs land as `type_identifier`,
+> so the type-reference gap that hits TS/Python mostly closes here. Only gap is
+> per-symbol `use` resolution (imports -143). Other languages unaffected (the one
+> shared dispatch line gates to empty for non-Rust).
+>
+> **Four languages now extract; node parity is exact-to-±1% on all four** (Go,
+> TS/JS, Python, Rust). The consistent edge follow-on is per-symbol import
+> resolution + type-ref completeness for the `identifier`-typed languages.
 
 - **Hybrid extractor model (CBM breadth × CG depth)** — a generic
   node-type-table-driven core (`extraction/engine.rs`, exists) driven by
