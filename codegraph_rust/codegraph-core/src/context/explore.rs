@@ -60,25 +60,52 @@ impl<'a> ContextBuilder<'a> {
         // --- Named-symbol seeding: ensure every identifier the agent named has its
         // substantive definition (and thus its file) in the subgraph.
         let mut named_seed_ids: HashSet<String> = HashSet::new();
-        let tokens: Vec<String> = query
-            .split(|c: char| c.is_whitespace() || "(),[]".contains(c))
-            .map(|t| t.trim_end_matches(|c: char| "?.,:;".contains(c)).to_string())
-            .filter(|t| t.len() >= 3 && is_ident_token(t))
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .take(16)
-            .collect();
+        // Order-preserving dedup (the TS uses an insertion-ordered Set): a plain
+        // HashSet would make which 16 tokens survive — and thus the surfaced
+        // files — nondeterministic across runs.
+        let tokens: Vec<String> = {
+            let mut seen = HashSet::new();
+            query
+                .split(|c: char| c.is_whitespace() || "(),[]".contains(c))
+                .map(|t| t.trim_end_matches(|c: char| "?.,:;".contains(c)).to_string())
+                .filter(|t| t.len() >= 3 && is_ident_token(t))
+                .filter(|t| seen.insert(t.clone()))
+                .take(16)
+                .collect()
+        };
+        // PascalCase tokens in the query are type/file disambiguators: when the
+        // agent writes "DataRequest task validate", the `task`/`validate` it wants
+        // are DataRequest's, not same-named overloads elsewhere. Bias overloaded
+        // names toward the file/class the query also names (port of explore's
+        // typeTokens/inNamedContext); otherwise a common name seeds the wrong def.
+        let type_tokens: Vec<String> =
+            tokens.iter().filter(|t| is_pascal(t)).map(|t| t.to_ascii_lowercase()).collect();
         for t in &tokens {
             let raw = self.store.get_nodes_by_name_full(t, 60)?;
             let mut cands: Vec<Node> = raw
                 .into_iter()
                 .filter(|n| CALLABLE.contains(&n.kind) && !qu::is_test_file(&n.file_path))
                 .collect();
-            cands.sort_by_key(|n| std::cmp::Reverse(body_lines(n)));
+            cands.sort_by(|a, b| {
+                body_lines(b).cmp(&body_lines(a)).then_with(|| a.id.cmp(&b.id))
+            });
             let picks: Vec<Node> = if cands.len() <= 3 {
                 cands
             } else {
-                cands.into_iter().take(1).collect()
+                let in_ctx: Vec<Node> = cands
+                    .iter()
+                    .filter(|n| {
+                        let fp = n.file_path.to_ascii_lowercase();
+                        let qn = n.qualified_name.to_ascii_lowercase();
+                        type_tokens.iter().any(|ct| fp.contains(ct.as_str()) || qn.contains(ct.as_str()))
+                    })
+                    .cloned()
+                    .collect();
+                if !in_ctx.is_empty() {
+                    in_ctx.into_iter().take(4).collect()
+                } else {
+                    cands.into_iter().take(1).collect()
+                }
             };
             for n in picks {
                 named_seed_ids.insert(n.id.clone());
@@ -168,7 +195,11 @@ impl<'a> ContextBuilder<'a> {
             .iter()
             .filter(|(fp, g)| **g > 0.0 && term_hits.get(*fp).copied().unwrap_or(0) >= 1)
             .collect();
-        central_sorted.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Tiebreak on path so equal-score files pick the same 2 every run
+        // (file_graph is a HashMap — iteration order is otherwise nondeterministic).
+        central_sorted.sort_by(|a, b| {
+            b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.0.cmp(b.0))
+        });
         let central: HashSet<String> = central_sorted.iter().take(2).map(|(f, _)| (*f).clone()).collect();
 
         // Files defining a named/root symbol.
@@ -225,7 +256,12 @@ impl<'a> ContextBuilder<'a> {
             if age != bge {
                 return age.cmp(&bge);
             }
-            b.1 .1.partial_cmp(&a.1 .1).unwrap_or(std::cmp::Ordering::Equal)
+            // Final tiebreak on path: `groups` is a HashMap, so without a total
+            // order the rendered file order would vary run-to-run on ties.
+            b.1 .1
+                .partial_cmp(&a.1 .1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
         });
 
         // --- Render.
@@ -406,6 +442,15 @@ fn is_ident_token(t: &str) -> bool {
 
 fn body_lines(n: &Node) -> u32 {
     n.end_line.saturating_sub(n.start_line)
+}
+
+/// A PascalCase type/file disambiguator: starts uppercase, ≥4 chars, has a
+/// lowercase letter (so it's not a bare acronym).
+fn is_pascal(t: &str) -> bool {
+    let mut chars = t.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
+        && t.chars().count() >= 4
+        && t.chars().any(|c| c.is_ascii_lowercase())
 }
 
 fn number_lines(slice: &str, first: u32) -> String {

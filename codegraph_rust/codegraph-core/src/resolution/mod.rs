@@ -95,7 +95,7 @@ fn resolve_one(g: &Graph, r: &UnresolvedReference) -> Option<Resolved> {
     // Strategy: Go cross-package import resolution (`pkg.Func`) — high confidence.
     if r.language == Some(Language::Go) {
         if let Some(res) = resolve_go_cross_package(g, r) {
-            return Some(res); // confidence 0.9 → accept immediately (TS behavior)
+            return Some(res); // import_map confidence (0.95) → accept immediately
         }
     }
 

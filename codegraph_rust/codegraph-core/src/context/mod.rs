@@ -120,6 +120,16 @@ pub struct ContextBuilder<'a> {
 impl<'a> ContextBuilder<'a> {
     pub fn new(store: &'a Store, project_root: &Path) -> Self {
         let project_tokens = qu::derive_project_name_tokens(project_root);
+        Self::with_tokens(store, project_root, project_tokens)
+    }
+
+    /// Construct with precomputed project-name tokens — lets a long-lived server
+    /// derive them once at startup instead of re-reading go.mod/package.json per call.
+    pub fn with_tokens(
+        store: &'a Store,
+        project_root: &Path,
+        project_tokens: HashSet<String>,
+    ) -> Self {
         ContextBuilder {
             store,
             project_root: project_root.to_path_buf(),
@@ -178,7 +188,7 @@ impl<'a> ContextBuilder<'a> {
                         r.score += (count as f64 - 1.0) * 20.0;
                     }
                 }
-                exact_matches.sort_by(|a, b| cmp_desc(a.score, b.score));
+                exact_matches.sort_by(by_score_then_id);
             }
             exact_matches.truncate((search_limit as f64 * 2.0).ceil() as usize);
         }
@@ -210,14 +220,14 @@ impl<'a> ContextBuilder<'a> {
                         matched.push(SearchResult { score: r.score + 15.0 + brevity, node: r.node });
                     }
                 }
-                matched.sort_by(|a, b| cmp_desc(a.score, b.score));
+                matched.sort_by(by_score_then_id);
                 for r in matched.into_iter().take((search_limit as f64).ceil() as usize) {
                     if !exact_matches.iter().any(|e| e.node.id == r.node.id) {
                         exact_matches.push(r);
                     }
                 }
             }
-            exact_matches.sort_by(|a, b| cmp_desc(a.score, b.score));
+            exact_matches.sort_by(by_score_then_id);
             exact_matches.truncate((search_limit as f64 * 3.0).ceil() as usize);
         }
 
@@ -253,7 +263,7 @@ impl<'a> ContextBuilder<'a> {
                     r
                 })
                 .collect();
-            text_results.sort_by(|a, b| cmp_desc(a.score, b.score));
+            text_results.sort_by(by_score_then_id);
             text_results.truncate(search_limit * 2);
         }
 
@@ -361,7 +371,7 @@ impl<'a> ContextBuilder<'a> {
                     r.score *= 0.6;
                 }
             }
-            search_results.sort_by(|a, b| cmp_desc(a.score, b.score));
+            search_results.sort_by(by_score_then_id);
         }
 
         // Step 5b: CamelCase-boundary LIKE matches.
@@ -406,7 +416,7 @@ impl<'a> ContextBuilder<'a> {
                         .max(0.0);
                     term_cands.push(SearchResult { score: 8.0 + brevity + path_score as f64, node: r.node });
                 }
-                term_cands.sort_by(|a, b| cmp_desc(a.score, b.score));
+                term_cands.sort_by(by_score_then_id);
                 let accum = max_camel_per_term * 4;
                 for r in term_cands.into_iter().take(accum) {
                     if let Some(existing) = camel_node_terms.get_mut(&r.node.id) {
@@ -423,7 +433,7 @@ impl<'a> ContextBuilder<'a> {
                     r
                 })
                 .collect();
-            camel_results.sort_by(|a, b| cmp_desc(a.score, b.score));
+            camel_results.sort_by(by_score_then_id);
             let mut id_set = search_id_set;
             for r in camel_results.into_iter().take(search_limit) {
                 if id_set.insert(r.node.id.clone()) {
@@ -466,7 +476,7 @@ impl<'a> ContextBuilder<'a> {
                         });
                     }
                 }
-                compound_results.sort_by(|a, b| cmp_desc(a.score, b.score));
+                compound_results.sort_by(by_score_then_id);
                 let max_compound = ((search_limit as f64) / 2.0).ceil() as usize;
                 for r in compound_results.into_iter().take(max_compound) {
                     if id_set.insert(r.node.id.clone()) {
@@ -477,7 +487,7 @@ impl<'a> ContextBuilder<'a> {
         }
 
         // Final sort + truncate.
-        search_results.sort_by(|a, b| cmp_desc(a.score, b.score));
+        search_results.sort_by(by_score_then_id);
         search_results.truncate(search_limit * 3);
         let mut filtered: Vec<SearchResult> =
             search_results.into_iter().filter(|r| r.score >= opts.min_score).collect();
@@ -622,13 +632,17 @@ impl<'a> ContextBuilder<'a> {
                     priority.insert(e.source.clone());
                 }
             }
+            // Keep priority nodes first, then fill. Iterate sg.nodes (insertion-
+            // ordered) rather than the `priority` HashSet — HashSet iteration order
+            // is randomized per process, which would make the kept set (and recall)
+            // nondeterministic when there are more priority nodes than max_nodes.
             let mut kept: indexmap::IndexMap<String, Node> = indexmap::IndexMap::new();
-            for id in &priority {
+            for (id, node) in &sg.nodes {
                 if kept.len() >= opts.max_nodes {
                     break;
                 }
-                if let Some(n) = sg.nodes.get(id) {
-                    kept.insert(id.clone(), n.clone());
+                if priority.contains(id) {
+                    kept.insert(id.clone(), node.clone());
                 }
             }
             for (id, node) in &sg.nodes {
@@ -1043,6 +1057,13 @@ fn cmp_desc(a: f64, b: f64) -> std::cmp::Ordering {
     b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal)
 }
 
+/// Sort SearchResults by score descending, breaking ties on node id so the
+/// result order (and thus which nodes survive truncation, and final recall) is
+/// reproducible — the inputs come from HashMaps whose iteration order is not.
+fn by_score_then_id(a: &SearchResult, b: &SearchResult) -> std::cmp::Ordering {
+    cmp_desc(a.score, b.score).then_with(|| a.node.id.cmp(&b.node.id))
+}
+
 fn title_case(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -1075,31 +1096,26 @@ fn is_config_leaf(node: &Node) -> bool {
         )
 }
 
-/// Port of `validatePathWithinRoot` (lexical + canonicalize containment).
+/// Port of `validatePathWithinRoot` (lexical + canonicalize containment). The
+/// chokepoint that keeps out-of-root file contents from leaking into output.
 pub fn validate_path_within_root(project_root: &Path, file_path: &str) -> Option<PathBuf> {
-    let resolved = project_root.join(file_path);
-    let root = project_root.canonicalize().unwrap_or_else(|_| project_root.to_path_buf());
-    // Lexical check.
+    // Anchor on the canonical root so the lexical check below is sound.
+    let root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_lexical(project_root));
+    let resolved = root.join(file_path);
+    // 1. Lexical containment — catches `../` traversal cheaply, before disk I/O.
+    //    (A plain `starts_with(project_root)` would NOT: `root/../../etc` has
+    //    `root` as a component prefix yet escapes — so normalize first.)
     let norm = normalize_lexical(&resolved);
-    if !norm.starts_with(&root) && !resolved.starts_with(project_root) {
-        // fall through to canonicalize check
+    if !norm.starts_with(&root) {
+        return None;
     }
+    // 2. Symlink-aware containment for paths that exist; ENOENT falls back to the
+    //    lexical path (which already passed step 1).
     match resolved.canonicalize() {
-        Ok(real) => {
-            if real.starts_with(&root) {
-                Some(real)
-            } else {
-                None
-            }
-        }
-        Err(_) => {
-            // ENOENT: allow the lexical path if it stays within root.
-            if norm.starts_with(&root) || resolved.starts_with(project_root) {
-                Some(resolved)
-            } else {
-                None
-            }
-        }
+        Ok(real) => real.starts_with(&root).then_some(real),
+        Err(_) => Some(norm),
     }
 }
 
