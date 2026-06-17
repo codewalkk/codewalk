@@ -7,6 +7,7 @@
 
 mod builtins;
 pub mod graph;
+mod import_resolver;
 mod name_matcher;
 mod synth;
 
@@ -85,6 +86,13 @@ pub fn resolve(repo_root: &Path, store: &mut Store) -> Result<ResolveStats> {
 
 /// Resolve a single ref (port of `resolveOne`, Go path).
 fn resolve_one(g: &Graph, r: &UnresolvedReference) -> Option<Resolved> {
+    // TS/JS module-scoped import resolution is authoritative for `imports` refs
+    // that carry a module specifier (in `candidates`): resolve the name within
+    // the imported module's file. Don't fall through to name-matching, which
+    // would resolve `X` to ANY same-named symbol rather than the imported one.
+    if r.reference_kind == ReferenceKind::Edge(EdgeKind::Imports) && r.candidates.is_some() {
+        return import_resolver::resolve_ts_import(g, r);
+    }
     if builtins::is_builtin_or_external(g, r) {
         return None;
     }

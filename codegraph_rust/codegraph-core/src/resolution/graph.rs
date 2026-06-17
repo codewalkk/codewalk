@@ -94,6 +94,11 @@ impl Graph {
     pub fn nodes_in_file(&self, path: &str) -> &[usize] {
         self.by_file.get(path).map(|v| v.as_slice()).unwrap_or(&[])
     }
+    /// Whether `path` (repo-relative) is an indexed file — used by import
+    /// resolution to probe candidate module→file mappings.
+    pub fn file_indexed(&self, path: &str) -> bool {
+        self.by_file.contains_key(path)
+    }
     pub fn idx_of(&self, id: &str) -> Option<usize> {
         self.by_id.get(id).copied()
     }
