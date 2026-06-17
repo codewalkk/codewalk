@@ -237,7 +237,7 @@ their source (CBM / CG / CW).
 |---|---|---|---|
 | M0–M2 | ✅ done | scaffold + FTS5 proof; Go extract+index+search; resolution + graph + synth | *(already mirrors CBM's extract→build→resolve spine with rayon)* |
 | **M3 — MCP serve (mode 1)** | ✅ done | `rmcp` server, 4-tool surface, `buildContext`, explore budgets | camelCase FTS pre-split (CBM); explicit confidence ladder + candidate-count penalty in resolution (CBM) |
-| **M4 — widen languages** | ⬜ | TS/JS, Python, Rust extractors + frameworks + synthesizers | hybrid table-driven + per-language-hook extractor model (CBM breadth × CG depth); **per-language type-resolution pass, Go first** (CBM precision) |
+| **M4 — widen languages** | 🔨 in progress | **TS/JS extractors DONE** (Python, Rust next) + frameworks + synthesizers | hybrid table-driven + per-language-hook extractor model (CBM breadth × CG depth); **per-language type-resolution pass, Go first** (CBM precision) |
 | **M4.5 — incremental + watch** | ⬜ [insert] | — | git-status + content-hash incremental indexing (CBM/CG); `notify` watcher (CG) |
 | **M5 — learned layer (mode 2)** | ⬜ | `fastembed`, KB, RRF fusion, capture/distill, install | wire `markStale` on changed `ref_files` (fixes CW's inert staleness, reuses M4.5 hashing); miss-driven capture from `kb_query_log` (CW gap) |
 | **M5.5 — overview/similarity** | ⬜ [insert] | — | Leiden communities + `get_architecture` (CBM); MinHash/LSH `SIMILAR_TO` (CBM) |
@@ -292,7 +292,23 @@ banner above).
   TS**; the k8s hero question (`scheduler-cycle`) answered in ≤1 explore call, 0
   Read/Grep; single binary runs with no Node and no FTS5 cliff.
 
-### M4 · More languages (breadth without losing depth) ⬜
+### M4 · More languages (breadth without losing depth) 🔨
+> **M4a done (2026-06-17): TypeScript + JavaScript extractors.** The hybrid model
+> proved out — the engine's hook-driven dispatch needed only generalizing (arrow-
+> from-declarator naming, `resolve_body`/`resolve_name`/`classify_method_node`/
+> `import_module` hooks, object-of-functions extraction, generic TS variable +
+> type-annotation + class-heritage paths). New `languages/typescript.rs` +
+> `javascript.rs` (TSX/JSX reuse them). Grammars: `tree-sitter-typescript` 0.23 +
+> `tree-sitter-javascript` 0.25 (ABI-compatible with the 0.25 runtime, smoke-tested).
+> **Parity on `codewalk_kb/codegraph/src` (135 TS files): nodes EXACT 2,925 = 2,925**
+> (every kind within ±2: function 877✓, method 583✓, import 510✓, constant 366✓,
+> interface 120✓, class 55✓). Edges 8,796 vs 10,740 (82%) — `contains` 2,790✓,
+> `calls` 4,278/4,284 (99.9%), `extends`/`implements` exact. The edge gap is **TS
+> import resolution** (per-symbol named imports, −959) + fuller type-reference
+> coverage (−974) — the resolution follow-on, not the extractor. **Go re-verified
+> byte-identical** (8,751 / 167,101 / 592,456), so the generalization was non-regressing.
+> Next: TS import resolution to close the edge gap, then Python → Rust.
+
 - **Hybrid extractor model (CBM breadth × CG depth)** — a generic
   node-type-table-driven core (`extraction/engine.rs`, exists) driven by
   per-language `LanguageSpec` data tables (cheap breadth, CBM-style: a quirk-free

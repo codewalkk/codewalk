@@ -105,6 +105,32 @@ pub trait LanguageExtractor: Send + Sync {
     fn resolve_type_alias_kind(&self, _node: TsNode<'_>, _source: &str) -> Option<NodeKind> {
         None
     }
+
+    /// Classify a `method_types` node as method or property (TS/JS class fields:
+    /// a function-valued field is a method, a plain field is a property). Returns
+    /// `Some(Property)` to demote, else `None` to keep it a method.
+    fn classify_method_node(&self, _node: TsNode<'_>) -> Option<NodeKind> {
+        None
+    }
+
+    /// Resolve a function/method body when it isn't the plain `body` field —
+    /// TS/JS arrow-function class fields nest the body inside the arrow
+    /// (`field = () => {…}` / `field = throttle(() => {…})`). None → use `body_field`.
+    fn resolve_body<'t>(&self, _node: TsNode<'t>, _body_field: &str) -> Option<TsNode<'t>> {
+        None
+    }
+
+    /// Resolve a symbol name when it isn't on `name_field` (JS `field_definition`
+    /// names its key the `property` field). None → fall through to the default.
+    fn resolve_name(&self, _node: TsNode<'_>, _source: &str) -> Option<String> {
+        None
+    }
+
+    /// Extract an import's (module_name, signature) — generalizes the import path
+    /// across grammars (TS `import_statement` has a `source` field). None → no import.
+    fn import_module(&self, _node: TsNode<'_>, _source: &str) -> Option<(String, String)> {
+        None
+    }
 }
 
 // =============================================================================
@@ -136,6 +162,17 @@ pub fn find_child_by_types<'t>(node: TsNode<'t>, types: &[&str]) -> Option<TsNod
 /// Extract a symbol name (`extractName`) — the Go-relevant subset: name field
 /// first, else the first identifier-like named child, else `<anonymous>`.
 pub fn extract_name(node: TsNode<'_>, source: &str, extractor: &dyn LanguageExtractor) -> String {
+    // Hook first (JS `field_definition` → `property` field).
+    if let Some(name) = extractor.resolve_name(node, source) {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    // Arrow/function expressions are named from their parent declarator, not from
+    // a body identifier — so don't let the identifier fallback below mis-name them.
+    if matches!(node.kind(), "arrow_function" | "function_expression") {
+        return "<anonymous>".to_string();
+    }
     if let Some(name_node) = child_by_field(node, extractor.name_field()) {
         return node_text(name_node, source).to_string();
     }
