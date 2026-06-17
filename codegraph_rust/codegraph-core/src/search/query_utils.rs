@@ -109,7 +109,7 @@ pub fn get_stem_variants(term: &str) -> Vec<String> {
 
 /// Insert spaces at camelCase / PascalCase / acronym boundaries.
 /// `getUserName` → `get User Name`, `RPCProtocol` → `RPC Protocol`.
-fn camel_space(s: &str) -> String {
+pub(crate) fn camel_space(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len() + 8);
     for i in 0..chars.len() {

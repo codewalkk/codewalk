@@ -436,6 +436,11 @@ fn find_best_match(graph: &Graph, r: &UnresolvedReference, cands: &[usize]) -> O
         if c.is_exported {
             score += 10;
         }
+        // Line-proximity tie-break (port of findBestMatch): among same-name
+        // candidates, prefer the one defined nearest the reference's line — the
+        // deciding signal when two definitions share a file. Bounded 0..=20.
+        let line_diff = (c.start_line as i64 - r.line as i64).abs();
+        score += (20 - line_diff / 10).max(0);
         // Test-path deprioritization (CBM): a candidate in a test file is rarely
         // the real target of a non-test reference. Demote it so production defs win.
         if crate::search::query_utils::is_test_file(&c.file_path)
@@ -459,26 +464,10 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Split camelCase/PascalCase into words (port of `splitCamelCase`).
+/// Split camelCase/PascalCase into words (port of `splitCamelCase`). Shares the
+/// boundary algorithm with FTS `name_split` via `query_utils::camel_space`.
 fn split_camel(s: &str) -> Vec<String> {
-    let mut spaced = String::with_capacity(s.len() * 2);
-    let chars: Vec<char> = s.chars().collect();
-    for i in 0..chars.len() {
-        let c = chars[i];
-        if i > 0 {
-            let prev = chars[i - 1];
-            if (prev.is_ascii_lowercase() && c.is_ascii_uppercase())
-                || (prev.is_ascii_uppercase()
-                    && c.is_ascii_uppercase()
-                    && i + 1 < chars.len()
-                    && chars[i + 1].is_ascii_lowercase())
-            {
-                spaced.push(' ');
-            }
-        }
-        spaced.push(c);
-    }
-    spaced
+    crate::search::query_utils::camel_space(s)
         .split(|ch: char| ch.is_whitespace() || "._:/\\".contains(ch))
         .filter(|w| w.len() > 1)
         .map(|w| w.to_string())

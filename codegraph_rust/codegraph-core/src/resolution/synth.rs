@@ -124,6 +124,9 @@ fn go_cross_file_method_contains(graph: &Graph) -> Vec<Edge> {
 fn go_implements(graph: &Graph) -> Vec<Edge> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+    // Names of interfaces whose implementer set was truncated by the per-channel
+    // cap — surfaced below so the cap isn't a silent coverage gap.
+    let mut capped: Vec<String> = Vec::new();
 
     let go_structs: Vec<usize> = graph
         .nodes_by_kind(NodeKind::Struct)
@@ -152,6 +155,7 @@ fn go_implements(graph: &Graph) -> Vec<Edge> {
         let mut added = 0;
         for &si in &go_structs {
             if added >= MAX_CALLBACKS_PER_CHANNEL {
+                capped.push(iface.name.clone());
                 break;
             }
             let s = graph.node(si);
@@ -179,6 +183,14 @@ fn go_implements(graph: &Graph) -> Vec<Edge> {
             out.push(e);
             added += 1;
         }
+    }
+    if !capped.is_empty() {
+        eprintln!(
+            "  note: go-implements capped at {} structs/interface for {} interface(s) (e.g. {}) — some implements edges omitted",
+            MAX_CALLBACKS_PER_CHANNEL,
+            capped.len(),
+            capped.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+        );
     }
     out
 }

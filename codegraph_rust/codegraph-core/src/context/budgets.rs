@@ -27,10 +27,8 @@ pub struct ExploreOutputBudget {
     pub max_symbols_in_file_header: usize,
     pub max_edges_per_relationship_kind: usize,
     pub include_relationships: bool,
-    pub include_additional_files: bool,
     pub include_completeness_signal: bool,
     pub include_budget_note: bool,
-    pub exclude_low_value_files: bool,
 }
 
 /// Port of `getExploreOutputBudget` — tiered by file count, capped ~24K so the
@@ -45,10 +43,8 @@ pub fn get_explore_output_budget(file_count: usize) -> ExploreOutputBudget {
             max_symbols_in_file_header: 5,
             max_edges_per_relationship_kind: 4,
             include_relationships: false,
-            include_additional_files: false,
             include_completeness_signal: false,
             include_budget_note: false,
-            exclude_low_value_files: true,
         }
     } else if file_count < 500 {
         ExploreOutputBudget {
@@ -59,10 +55,8 @@ pub fn get_explore_output_budget(file_count: usize) -> ExploreOutputBudget {
             max_symbols_in_file_header: 6,
             max_edges_per_relationship_kind: 6,
             include_relationships: false,
-            include_additional_files: false,
             include_completeness_signal: false,
             include_budget_note: false,
-            exclude_low_value_files: true,
         }
     } else if file_count < 5000 {
         ExploreOutputBudget {
@@ -73,10 +67,8 @@ pub fn get_explore_output_budget(file_count: usize) -> ExploreOutputBudget {
             max_symbols_in_file_header: 10,
             max_edges_per_relationship_kind: 10,
             include_relationships: true,
-            include_additional_files: true,
             include_completeness_signal: true,
             include_budget_note: true,
-            exclude_low_value_files: false,
         }
     } else {
         // 5000+ (and 15000+): same ~24K ceiling; more files → more CALLS, not a bigger response.
@@ -88,10 +80,8 @@ pub fn get_explore_output_budget(file_count: usize) -> ExploreOutputBudget {
             max_symbols_in_file_header: 15,
             max_edges_per_relationship_kind: 15,
             include_relationships: true,
-            include_additional_files: true,
             include_completeness_signal: true,
             include_budget_note: true,
-            exclude_low_value_files: false,
         }
     }
 }

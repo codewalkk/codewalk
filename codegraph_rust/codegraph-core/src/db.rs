@@ -599,7 +599,7 @@ impl Store {
                     + score_path_relevance(&r.node.file_path, query, project_tokens) as f64
                     + name_match_bonus(&r.node.name, query) as f64;
             }
-            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.node.id.cmp(&b.node.id)));
             results.truncate(limit);
         }
         Ok(results)
@@ -641,7 +641,8 @@ impl Store {
                 p.push(Box::new(k.as_str().to_string()));
             }
         }
-        sql += " ORDER BY score LIMIT ?";
+        // `nodes.id` tiebreak makes the LIMIT cut deterministic on score ties.
+        sql += " ORDER BY score, nodes.id LIMIT ?";
         p.push(Box::new(fts_limit as i64));
         let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
@@ -691,7 +692,7 @@ impl Store {
                 p.push(Box::new(k.as_str().to_string()));
             }
         }
-        sql += " ORDER BY score DESC, length(name) ASC LIMIT ?";
+        sql += " ORDER BY score DESC, length(name) ASC, id LIMIT ?";
         p.push(Box::new(limit as i64));
         let mut stmt = self.conn.prepare(&sql)?;
         let pr: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();
@@ -767,13 +768,13 @@ impl Store {
                 let boost = if distinctive_files.contains(&node.file_path) { 20.0 } else { 0.0 };
                 name_results.push(SearchResult { node, score: 1.0 + boost });
             }
-            name_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            name_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.node.id.cmp(&b.node.id)));
             for r in name_results.into_iter().take(per_name_limit) {
                 seen.insert(r.node.id.clone());
                 all.push(r);
             }
         }
-        all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.node.id.cmp(&b.node.id)));
         all.truncate(limit);
         Ok(all)
     }
@@ -798,7 +799,7 @@ impl Store {
                 p.push(Box::new(k.as_str().to_string()));
             }
         }
-        sql += " ORDER BY length(name) ASC LIMIT ?";
+        sql += " ORDER BY length(name) ASC, id LIMIT ?";
         p.push(Box::new(limit as i64));
         let mut stmt = self.conn.prepare(&sql)?;
         let pr: Vec<&dyn rusqlite::ToSql> = p.iter().map(|b| b.as_ref()).collect();

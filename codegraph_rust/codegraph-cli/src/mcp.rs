@@ -73,6 +73,9 @@ struct Inner {
     project_root: PathBuf,
     file_count: usize,
     indexed: bool,
+    /// go.mod / package.json / repo-name tokens — a fixed property of the project
+    /// root, computed ONCE at startup (was re-read from disk on every request).
+    project_tokens: std::collections::HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -89,12 +92,15 @@ impl CodegraphServer {
             .and_then(|s| s.stats().ok())
             .map(|s| s.file_count as usize)
             .unwrap_or(0);
+        let project_tokens =
+            codegraph_core::search::query_utils::derive_project_name_tokens(&project_root);
         CodegraphServer {
             inner: std::sync::Arc::new(Inner {
                 store: store.map(Mutex::new),
                 project_root,
                 file_count,
                 indexed,
+                project_tokens,
             }),
             tool_router: Self::tool_router(),
         }
@@ -109,7 +115,10 @@ impl CodegraphServer {
     fn with_store<F: FnOnce(&Store, &Path) -> String>(&self, f: F) -> Result<CallToolResult, McpError> {
         match &self.inner.store {
             Some(m) => {
-                let guard = m.lock().expect("store mutex");
+                // Recover a poisoned lock instead of propagating the panic: a single
+                // handler panic must not brick the long-lived stdio server for the
+                // rest of the session (success-shaped-error contract).
+                let guard = m.lock().unwrap_or_else(|e| e.into_inner());
                 let out = f(&guard, &self.inner.project_root);
                 Self::text(out)
             }
@@ -129,13 +138,14 @@ impl CodegraphServer {
     )]
     async fn codegraph_explore(&self, Parameters(args): Parameters<ExploreArgs>) -> Result<CallToolResult, McpError> {
         let fc = self.inner.file_count;
+        let tokens = self.inner.project_tokens.clone();
         self.with_store(move |store, root| {
             let budget = get_explore_output_budget(fc);
             let max_files = args
                 .max_files
                 .map(|m| (m as usize).clamp(1, 20))
                 .unwrap_or(budget.default_max_files);
-            let builder = ContextBuilder::new(store, root);
+            let builder = ContextBuilder::with_tokens(store, root, tokens);
             match builder.explore_markdown(&args.query, max_files, &budget) {
                 Ok(mut md) => {
                     if budget.include_budget_note {
@@ -156,10 +166,10 @@ impl CodegraphServer {
         description = "Quick symbol search by name. Returns locations only (no code). Use codegraph_explore to get the actual source / understand an area in one call."
     )]
     async fn codegraph_search(&self, Parameters(args): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
-        self.with_store(move |store, root| {
+        let tokens = self.inner.project_tokens.clone();
+        self.with_store(move |store, _root| {
             let limit = args.limit.unwrap_or(10) as usize;
             let kinds: Vec<NodeKind> = args.kind.as_deref().and_then(parse_kind).into_iter().collect();
-            let tokens = codegraph_core::search::query_utils::derive_project_name_tokens(root);
             match store.search_nodes(&args.query, &kinds, limit, &tokens) {
                 Ok(hits) if !hits.is_empty() => {
                     let mut out = format!("{} result(s) for \"{}\":\n", hits.len(), args.query);
@@ -331,9 +341,24 @@ fn run_node(store: &Store, root: &Path, args: &NodeArgs) -> String {
             return "codegraph_node needs a `symbol` (to read a symbol) or a `file` (to read a file like Read).".to_string();
         };
         // Resolve file (exact or suffix) via the nodes table.
-        let rel = resolve_file_path(store, file);
-        let Some(rel) = rel else {
-            return format!("No indexed file matches \"{}\". Use Read for unindexed files (configs, docs).", file);
+        let rel = match resolve_file_path(store, file) {
+            FileMatch::One(p) => p,
+            FileMatch::None => {
+                return format!(
+                    "No indexed file matches \"{}\". Use Read for unindexed files (configs, docs).",
+                    file
+                );
+            }
+            // Don't guess: an ambiguous fragment must not silently read an
+            // arbitrary file the agent would then treat as already-Read.
+            FileMatch::Ambiguous(paths) => {
+                return format!(
+                    "\"{}\" matches {} files — pass a more specific path:\n{}",
+                    file,
+                    paths.len(),
+                    paths.iter().take(10).map(|p| format!("  - {}", p)).collect::<Vec<_>>().join("\n")
+                );
+            }
         };
         if args.symbols_only.unwrap_or(false) {
             return file_symbol_map(store, &rel);
@@ -344,14 +369,20 @@ fn run_node(store: &Store, root: &Path, args: &NodeArgs) -> String {
         let offset = args.offset.unwrap_or(1).max(1) as usize;
         let limit = args.limit.map(|l| l as usize).unwrap_or(2000);
         let start = offset - 1;
-        let end = (start + limit).min(lines.len());
         let mut out = String::new();
         let deps = store.get_dependent_file_paths(&rel).unwrap_or_default();
         if !deps.is_empty() {
             out.push_str(&format!("// {} file(s) depend on {} (e.g. {})\n", deps.len(), rel, deps.iter().take(3).cloned().collect::<Vec<_>>().join(", ")));
         }
         out.push_str(&format!("// {}\n", rel));
-        for (i, line) in lines[start..end.max(start)].iter().enumerate() {
+        // Guard the slice: an `offset` past the end of the file would make
+        // `start >= lines.len()` and `lines[start..start]` panic.
+        if start >= lines.len() {
+            out.push_str(&format!("// (offset {} is past end of file: {} lines)\n", offset, lines.len()));
+            return out;
+        }
+        let end = (start + limit).min(lines.len());
+        for (i, line) in lines[start..end].iter().enumerate() {
             out.push_str(&format!("{}\t{}\n", offset + i, line));
         }
         return out;
@@ -412,18 +443,35 @@ fn run_node(store: &Store, root: &Path, args: &NodeArgs) -> String {
     out
 }
 
-/// Find an indexed file whose path equals or ends with `q`.
-fn resolve_file_path(store: &Store, q: &str) -> Option<String> {
-    // Search the nodes table for a file_path match (cheap; one query).
+/// Outcome of resolving a `file` fragment to an indexed path.
+enum FileMatch {
+    One(String),
+    None,
+    /// Several files match the fragment and none is an exact/suffix hit — the
+    /// caller must ask the agent to disambiguate rather than guess.
+    Ambiguous(Vec<String>),
+}
+
+/// Resolve a `file` fragment to an indexed path: exact match, else unique suffix
+/// match, else (single substring hit) that file, else Ambiguous/None.
+fn resolve_file_path(store: &Store, q: &str) -> FileMatch {
     let ql = q.to_ascii_lowercase();
     let files = store.distinct_file_paths_like(&ql).unwrap_or_default();
-    // Prefer exact, then suffix, then contains.
-    files
-        .iter()
-        .find(|f| f.to_ascii_lowercase() == ql)
-        .or_else(|| files.iter().find(|f| f.to_ascii_lowercase().ends_with(&ql)))
-        .or_else(|| files.first())
-        .cloned()
+    if let Some(exact) = files.iter().find(|f| f.to_ascii_lowercase() == ql) {
+        return FileMatch::One(exact.clone());
+    }
+    let suffix: Vec<&String> = files.iter().filter(|f| f.to_ascii_lowercase().ends_with(&ql)).collect();
+    if suffix.len() == 1 {
+        return FileMatch::One(suffix[0].clone());
+    }
+    if suffix.len() > 1 {
+        return FileMatch::Ambiguous(suffix.into_iter().cloned().collect());
+    }
+    match files.len() {
+        0 => FileMatch::None,
+        1 => FileMatch::One(files.into_iter().next().unwrap()),
+        _ => FileMatch::Ambiguous(files),
+    }
 }
 
 fn file_symbol_map(store: &Store, rel: &str) -> String {
