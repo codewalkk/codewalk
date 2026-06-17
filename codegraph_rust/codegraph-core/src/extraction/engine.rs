@@ -740,6 +740,27 @@ impl<'a> Engine<'a> {
         None
     }
 
+    /// Python module-level assignment → a variable node (`MAX = 100`). Skips
+    /// `self.x = …` (attribute target), tuple/subscript targets.
+    fn extract_variable_py(&mut self, node: TsNode<'_>) {
+        let left = child_by_field(node, "left").or_else(|| node.named_child(0));
+        let Some(left) = left else { return };
+        if left.kind() != "identifier" {
+            return;
+        }
+        let name = node_text(left, self.source).to_string();
+        let right = child_by_field(node, "right").or_else(|| node.named_child(node.named_child_count().saturating_sub(1)));
+        let signature = right
+            .filter(|r| r.id() != left.id())
+            .map(|r| format!("= {}", truncate(node_text(r, self.source), 100)));
+        let extra = NodeExtra {
+            docstring: preceding_docstring(node, self.source),
+            signature,
+            ..Default::default()
+        };
+        self.create_node(NodeKind::Variable, &name, node, extra);
+    }
+
     /// Go variable/const declarations (var/const specs + `:=`).
     fn extract_variable(&mut self, node: TsNode<'_>) {
         if matches!(
@@ -747,6 +768,10 @@ impl<'a> Engine<'a> {
             Language::Typescript | Language::Tsx | Language::Javascript | Language::Jsx
         ) {
             self.extract_variable_ts(node);
+            return;
+        }
+        if self.language == Language::Python {
+            self.extract_variable_py(node);
             return;
         }
         let docstring = preceding_docstring(node, self.source);
@@ -883,6 +908,32 @@ impl<'a> Engine<'a> {
             }
             return;
         }
+        // Python `import os, sys` / `import os.path as p` — one node per module
+        // (the hook handled only `from … import`, port of the import_statement path).
+        if self.language == Language::Python && node.kind() == "import_statement" {
+            let parent_id = self.scopes.last().map(|s| s.id.clone());
+            let sig = node_text(node, self.source).trim().to_string();
+            for i in 0..node.named_child_count() {
+                let Some(child) = node.named_child(i) else { continue };
+                let dotted = match child.kind() {
+                    "dotted_name" => Some(child),
+                    "aliased_import" => find_child_by_types(child, &["dotted_name"]),
+                    _ => None,
+                };
+                if let Some(d) = dotted {
+                    let module = node_text(d, self.source).to_string();
+                    let extra = NodeExtra {
+                        signature: Some(sig.clone()),
+                        ..Default::default()
+                    };
+                    self.create_node(NodeKind::Import, &module, node, extra);
+                    if let Some(pid) = &parent_id {
+                        self.add_unresolved(pid, &module, ReferenceKind::Edge(EdgeKind::Imports), d);
+                    }
+                }
+            }
+            return;
+        }
         if self.language != Language::Go {
             return;
         }
@@ -982,8 +1033,9 @@ impl<'a> Engine<'a> {
         match func.kind() {
             "selector_expression" | "member_expression" | "field_expression"
             | "navigation_expression" | "attribute" => {
-                let property =
-                    child_by_field(func, "field").or_else(|| child_by_field(func, "property"));
+                let property = child_by_field(func, "field")
+                    .or_else(|| child_by_field(func, "property"))
+                    .or_else(|| child_by_field(func, "attribute")); // Python `obj.method`
                 if let Some(prop) = property {
                     let method = node_text(prop, self.source);
                     let receiver = child_by_field(func, "operand")
@@ -1112,6 +1164,18 @@ impl<'a> Engine<'a> {
                 "class_heritage" | "extends_clause" | "implements_clause"
                 | "extends_type_clause" => {
                     self.extract_ts_heritage(child, class_id);
+                }
+                // Python class bases: `class Foo(Base, Mixin, metaclass=M)` — the
+                // `superclasses` argument_list; positional identifiers are bases.
+                "argument_list" if self.language == Language::Python => {
+                    for j in 0..child.named_child_count() {
+                        let Some(b) = child.named_child(j) else { continue };
+                        if matches!(b.kind(), "identifier" | "attribute") {
+                            if let Some(name) = ts_base_type_name(b, self.source) {
+                                self.add_unresolved(class_id, &name, ReferenceKind::Edge(EdgeKind::Extends), b);
+                            }
+                        }
+                    }
                 }
                 "constraint_elem" => {
                     if let Some(tid) = (0..child.named_child_count())
@@ -1288,9 +1352,13 @@ fn ts_base_type_name(node: TsNode<'_>, source: &str) -> Option<String> {
             (!t.is_empty()).then(|| t.to_string())
         }
         "generic_type" => node.named_child(0).and_then(|c| ts_base_type_name(c, source)),
-        "member_expression" | "nested_type_identifier" => child_by_field(node, "property")
-            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
-            .and_then(|c| ts_base_type_name(c, source)),
+        // TS member_expression (`ns.Foo`) and Python attribute (`mod.Base`).
+        "member_expression" | "nested_type_identifier" | "attribute" => {
+            child_by_field(node, "property")
+                .or_else(|| child_by_field(node, "attribute"))
+                .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
+                .and_then(|c| ts_base_type_name(c, source))
+        }
         _ => {
             // Fall back to a descendant type_identifier/identifier.
             (0..node.named_child_count())

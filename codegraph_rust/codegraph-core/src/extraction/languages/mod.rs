@@ -3,6 +3,7 @@
 
 pub mod go;
 pub mod javascript;
+pub mod python;
 pub mod typescript;
 
 use crate::extraction::extractor::LanguageExtractor;
@@ -16,6 +17,7 @@ pub fn extractor_for(language: Language) -> Option<&'static dyn LanguageExtracto
         Language::Go => Some(&go::GoExtractor),
         Language::Typescript | Language::Tsx => Some(&typescript::TypescriptExtractor),
         Language::Javascript | Language::Jsx => Some(&javascript::JavascriptExtractor),
+        Language::Python => Some(&python::PythonExtractor),
         _ => None,
     }
 }

@@ -12,6 +12,7 @@ tree-sitter.workspace = true
 tree-sitter-go.workspace = true
 tree-sitter-typescript.workspace = true
 tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
 ignore.workspace = true
 rayon.workspace = true
 serde.workspace = true

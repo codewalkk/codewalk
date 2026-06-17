@@ -62,6 +62,7 @@ pub fn grammar_for(language: Language) -> Option<TsLanguage> {
         Language::Typescript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
         Language::Tsx => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
         Language::Javascript | Language::Jsx => Some(tree_sitter_javascript::LANGUAGE.into()),
+        Language::Python => Some(tree_sitter_python::LANGUAGE.into()),
         _ => None,
     }
 }
