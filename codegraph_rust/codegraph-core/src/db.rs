@@ -351,13 +351,14 @@ impl Store {
     /// Load every unresolved reference (for the resolution pass).
     pub fn all_unresolved(&self) -> Result<Vec<UnresolvedReference>> {
         let mut stmt = self.conn.prepare(
-            "SELECT from_node_id, reference_name, reference_kind, line, col, file_path, language
+            "SELECT from_node_id, reference_name, reference_kind, line, col, file_path, language, candidates
              FROM unresolved_refs",
         )?;
         let rows = stmt
             .query_map([], |r| {
                 let rk: String = r.get(2)?;
                 let lang: String = r.get(6)?;
+                let candidates: Option<String> = r.get(7)?;
                 Ok(UnresolvedReference {
                     from_node_id: r.get(0)?,
                     reference_name: r.get(1)?,
@@ -366,7 +367,7 @@ impl Store {
                     col: r.get(4)?,
                     file_path: r.get::<_, Option<String>>(5)?,
                     language: Some(parse_language(&lang)),
-                    candidates: None,
+                    candidates: candidates.and_then(|c| serde_json::from_str(&c).ok()),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

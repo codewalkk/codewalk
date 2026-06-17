@@ -851,9 +851,35 @@ impl<'a> Engine<'a> {
                 signature: Some(signature),
                 ..Default::default()
             };
-            self.create_node(NodeKind::Import, &module, node, extra);
+            let import_id = self.create_node(NodeKind::Import, &module, node, extra);
+            // A direct file→import `imports` edge (the file's module-level
+            // dependency), on top of the `contains` create_node already added —
+            // matches the TS graph and is the only import signal for externals.
+            if let (Some(iid), Some(pid)) = (&import_id, &parent_id) {
+                let mut e = Edge::new(pid.clone(), iid.clone(), EdgeKind::Imports);
+                e.provenance = Some(crate::types::Provenance::TreeSitter);
+                self.edges.push(e);
+            }
+            // Per-imported-symbol refs: each named/default import becomes an
+            // `imports` ref whose target is resolved by scoping `name` to the
+            // module's file (the module specifier is carried in `candidates`).
+            // External modules (`fs`, `commander`) carry a non-relative specifier
+            // that the import resolver declines, so they create no edge.
             if let Some(pid) = parent_id {
-                self.add_unresolved(&pid, &module, ReferenceKind::Edge(EdgeKind::Imports), node);
+                let line = node.start_position().row as u32 + 1;
+                let col = node.start_position().column as u32;
+                for name in self.imported_symbol_names(node) {
+                    self.unresolved.push(UnresolvedReference {
+                        from_node_id: pid.clone(),
+                        reference_name: name,
+                        reference_kind: ReferenceKind::Edge(EdgeKind::Imports),
+                        line,
+                        col,
+                        file_path: Some(self.file_path.to_string()),
+                        language: Some(self.language),
+                        candidates: Some(vec![module.clone()]),
+                    });
+                }
             }
             return;
         }
@@ -901,6 +927,47 @@ impl<'a> Engine<'a> {
                 );
             }
         }
+    }
+
+    /// The exported names brought in by a TS/JS `import_statement` — named
+    /// imports (`{ X, Y as Z }` → X, Y) and default imports (`import D from …`).
+    /// Namespace imports (`* as ns`) are skipped (they bind no single symbol).
+    fn imported_symbol_names(&self, node: TsNode<'_>) -> Vec<String> {
+        let mut out = Vec::new();
+        let Some(clause) = find_child_by_types(node, &["import_clause"]) else {
+            return out;
+        };
+        for i in 0..clause.named_child_count() {
+            let Some(c) = clause.named_child(i) else { continue };
+            match c.kind() {
+                // Default import binding (`import D from './d'`).
+                "identifier" => {
+                    let t = node_text(c, self.source).trim();
+                    if !t.is_empty() {
+                        out.push(t.to_string());
+                    }
+                }
+                "named_imports" => {
+                    for j in 0..c.named_child_count() {
+                        let Some(spec) = c.named_child(j) else { continue };
+                        if spec.kind() != "import_specifier" {
+                            continue;
+                        }
+                        // The `name` field is the EXPORTED name (what exists in the
+                        // target file); an `alias` only renames it locally.
+                        let nm = child_by_field(spec, "name").or_else(|| spec.named_child(0));
+                        if let Some(nm) = nm {
+                            let t = node_text(nm, self.source).trim();
+                            if !t.is_empty() {
+                                out.push(t.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {} // namespace_import etc.
+            }
+        }
+        out
     }
 
     /// Function/method call → a `calls` unresolved ref (TS `extractCall`, Go subset).

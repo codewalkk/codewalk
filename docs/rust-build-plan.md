@@ -307,7 +307,17 @@ banner above).
 > import resolution** (per-symbol named imports, −959) + fuller type-reference
 > coverage (−974) — the resolution follow-on, not the extractor. **Go re-verified
 > byte-identical** (8,751 / 167,101 / 592,456), so the generalization was non-regressing.
-> Next: TS import resolution to close the edge gap, then Python → Rust.
+>
+> **M4b done: TS import resolution.** Per-symbol import refs at extraction (named +
+> default imports, module specifier carried in `candidates`) + a module→file
+> resolver (`resolution/import_resolver.rs`, port of `resolveRelativeImport` +
+> `EXTENSION_RESOLUTION`): `import { QueryBuilder } from './db/queries'` now
+> resolves to the `QueryBuilder` class in `db/queries.ts` (module-scoped, not
+> name-matched). Plus the file→import module-dependency edge. Edges **8,796 → 9,531
+> (82% → 89%)**: **structural edges now EXACT** (calls 4,278/4,284, contains/extends/
+> implements 100%), imports 1,245/1,469 (85%). Remaining gap is **type-reference
+> completeness** (references 54% — function/method body type usages, interface
+> members, class generics), a separate refinement. Next: Python → Rust extractors.
 
 - **Hybrid extractor model (CBM breadth × CG depth)** — a generic
   node-type-table-driven core (`extraction/engine.rs`, exists) driven by
