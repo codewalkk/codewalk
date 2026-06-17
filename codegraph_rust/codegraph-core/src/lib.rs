@@ -8,14 +8,19 @@
 //! network. Those concerns live in `codewalk-kb` (mode 2), which depends on this
 //! crate, never the reverse.
 
+pub mod context;
 pub mod db;
 pub mod extraction;
+pub mod graph;
+pub mod resolution;
+pub mod search;
 pub mod types;
 
 use sha2::{Digest, Sha256};
 
 pub use db::{FileRecord, Stats, Store, WriteBatch};
 pub use extraction::{extract_file, index_repo, is_source_file, detect_language};
+pub use resolution::{resolve, ResolveStats};
 pub use types::{
     Edge, EdgeKind, ExtractionResult, Language, Node, NodeKind, Provenance, ReferenceKind,
     UnresolvedReference, Visibility,

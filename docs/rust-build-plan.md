@@ -3,8 +3,32 @@
 *Plan for a Rust-native re-implementation of Codewalk (codegraph core + the
 learned-intelligence layer) under `../codewalk_rust/`. Written from the working
 TypeScript implementation in `../codewalk_kb/`, which is the **behavioral spec**.
-We start building in a fresh session — this doc + [`codewalk_rust_arch.md`](codewalk_rust_arch.md)
+This doc + [`codewalk_rust_arch.md`](codewalk_rust_arch.md)
 + [`../codegraph_arch.md`](../codegraph_arch.md) are the entry points.*
+
+> **Status (2026-06-16): M0–M3 are DONE.** The Rust core indexes Go, resolves
+> references (cross-package import + name-match), synthesizes Go edges, traces
+> callers/callees, builds lexical context, and **serves the 4-tool CG MCP surface
+> over stdio (mode 1)** — verified end-to-end against the k8s benchmark. **Next up
+> is M4 onward.**
+>
+> **M3 parity (k8s, Go-only):** index 8,751 files · 167,101 nodes · 592,456 edges
+> (TS target 8,898 · 166,916 · 592,479 — at parity). Structural-cold recall
+> **0.328** (TS gate ~0.32). Hero question (`scheduler-cycle`): WITH codegraph
+> **0 Read · 0 Grep**, 5/5 expected symbols, via `codegraph_explore` only — vs
+> 6 Reads for the no-tool baseline. camelCase FTS recall via the `name_split`
+> column roughly doubles sub-token matches (e.g. `filter` 162→545, `informer`
+> 1081→2296). `codegraph serve --mcp` runs as a single static binary, no Node, no
+> FTS5 cliff. The resolution confidence ladder is stored on every resolved edge.
+>
+> **This plan now folds in the "best-of-both" improvement plan** derived from a
+> source-verified study of **Codebase-Memory** (the Tree-Sitter-in-C MCP
+> competitor) vs our CodeGraph/Codewalk stack. The full study lives at
+> [`../codebase-mem-mcp/docs/`](../codebase-mem-mcp/docs/) — read
+> [`04-rust-improvement-plan.md`](../codebase-mem-mcp/docs/04-rust-improvement-plan.md)
+> for the rationale behind every "best-of-both insert" below. Each insert is
+> tagged with its source of truth: **CBM** (Codebase-Memory), **CG** (CodeGraph),
+> **CW** (Codewalk).
 
 ---
 
@@ -39,7 +63,30 @@ build a JS/TS app on `codegraph_rust`.
 **Non-goals (for now):** day-one parity with codegraph's full 30+ language /
 24-framework / 20-synthesizer coverage (that's the moat — see
 [`../codegraph_arch.md`](../codegraph_arch.md) — and it's a long, benchmark-gated
-tail, §6). Browser/WASM target (napi/Node first).
+tail, §6). Browser/WASM target (napi/Node first). The CBM-style **direct B-tree
+page-writer flush** (kernel-in-3-min) — transactional bulk INSERT with
+indexes-dropped is enough until kernel-scale indexing is a real blocker.
+
+### 0.1 Design invariants (do not violate)
+
+From the comparative study — these are load-bearing and must hold across every
+milestone:
+
+1. **`codegraph-core` stays pure** — no embeddings, no LLM, no network. The
+   learned layer is a *separate crate/binary/DB* (`codewalk-kb`). *(Honored.)*
+2. **Two modes, two binaries, two DBs** — `codegraph` (`.codegraph/graph.db`) and
+   `codewalk` (`.codewalk/kb.db`). *(Scaffolded; mode-2 empty.)*
+3. **Typed enums, not stringly-typed** — keep `NodeKind`/`EdgeKind`. CBM uses
+   free-form `TEXT` for labels/edge-types; that is *worse* — do **not** copy it.
+4. **Every synthesized/guessed edge is provenance-tagged** — `Provenance::Heuristic`
+   + `synthesizedBy`/`registeredAt`; **silent beats wrong**. *(Honored in
+   `synth.rs`.)* CBM has no provenance — this is a CG win we keep.
+5. **Agent-sufficiency over power** — 3–4 tools, success-shaped errors, output
+   sufficient to stop the read. Do **not** ship CBM's 14-tool + raw-Cypher
+   surface as the default. (An optional, hidden Cypher-like capability for power
+   use is fine later — just don't lead with it.)
+6. **Bundled SQLite + FTS5** via `rusqlite` — own the SQLite build. *(Proven by
+   the M0 test; CBM independently validates the bet.)*
 
 ---
 
@@ -166,6 +213,11 @@ we never guess at parity:
 4. **codegraph's own bar** (`CLAUDE.md`) for each new language×framework: small/
    medium/large real repos, ≥3 flow prompts, deterministic probes + agent A/B
    (≥2 runs), pass bar ~0 Read/Grep within the explore budget.
+5. **Resolution precision** (new, from the CBM study) — track resolved/total refs
+   and **single-candidate share** on Go k8s; the type-resolution pass (M4) must
+   raise single-candidate share vs the name-matching baseline, with a manual
+   spot-check of ~20 ambiguous receivers resolving correctly. FTS recall on
+   camelCase queries must improve after the pre-split (M3).
 
 The benchmark harness is JS and only needs the `.codegraph`/`.codewalk` SQLite +
 a CLI/MCP endpoint, so it can drive the Rust binaries directly.
@@ -175,44 +227,153 @@ a CLI/MCP endpoint, so it can drive the Rust binaries directly.
 ## 6. Phased milestones
 
 Each milestone is independently shippable and benchmark-gated. **Port the
-highest-value coverage first (Go → the k8s benchmark), then widen.**
+highest-value coverage first (Go → the k8s benchmark), then widen.** Items marked
+**[insert]** are best-of-both additions from the competitive study, tagged with
+their source (CBM / CG / CW).
 
-- **M0 · Toolchain + scaffold (½–1 day).** `rustup` install (Rust is not yet on
-  this box). Cargo workspace + the 5 crate skeletons. Wire `rusqlite`
-  `bundled,fts5` and **prove FTS5 works** (`CREATE VIRTUAL TABLE … USING fts5`).
-  Port `schema.sql` → migration. *Done:* `cargo test` creates the schema + an FTS5
-  table on a stock toolchain (no Node, any OS).
-- **M1 · Extraction MVP (Go).** `LanguageExtractor` trait + Go extractor
-  (`tree-sitter-go`), file walk (`ignore`), node/edge model, store, FTS search,
-  `rayon` parallelism. *Done:* `codegraph index ../k8s` produces node/edge/file
-  counts within tolerance of the TS index (§5.1).
-- **M2 · Resolution + graph (Go).** Import resolution, name-matcher, the
-  Go-relevant synthesizers (`go-implements`, `interface-impl`,
-  `gin-middleware-chain`, `go-grpc-stub-impl`), graph traversal
-  (callers/callees/impact/path), context builder. *Done:* explore/trace connects
-  the scheduler flow end-to-end (parity with TS on the hero question).
-- **M3 · MCP server, mode 1 (`codegraph` binary).** `rmcp` stdio server +
-  structural tools + explore budgets + `server-instructions`. *Done:* the
-  benchmark harness drives the Rust MCP; structural-cold recall matches TS;
-  **single binary runs with no Node and no FTS5 cliff.**
-- **M4 · More languages.** TS/JS, Python, Rust extractors + their framework
-  resolvers + synthesizers, each validated by the §5 bar. *Done:* parity on at
-  least one non-Go benchmark repo.
-- **M5 · Learned layer, mode 2 (`codewalk` binary).** `codewalk-kb`: `fastembed`
-  MiniLM, KB store (rusqlite + cosine), fusion (RRF + structural), capture
-  (miner + `claude -p` distill), `codewalk_ask/learn/status` tools, `update`,
-  `install` (local scope). *Done:* full retrieval + agent A/B match the TS k8s
-  results (0.32→0.87; the multiplier chart).
-- **M6 · TS bindings + distribution.** `codegraph-node` (napi-rs) → publish
-  `@codewalk/codegraph-native` with prebuilds; optionally swap the TS Codewalk's
-  `@colbymchenry/codegraph` dependency for it (retrofits the FTS5 fix + perf into
-  the TS product). `curl | sh` single-binary install for both binaries.
+### Milestone map at a glance
 
-> Realistic expectation: M0–M3 (Go-only codegraph in Rust, FTS5-clean, benchmarked)
-> is the high-confidence near-term goal. M4–M5 widen coverage and add the learned
-> layer; M6 is the distribution/integration payoff. Full codegraph-parity across
-> all 30+ languages is a long tail — keep the TS codegraph as the reference and,
-> if useful, as a fallback during the transition.
+| Milestone | Status | Existing scope | Best-of-both inserts |
+|---|---|---|---|
+| M0–M2 | ✅ done | scaffold + FTS5 proof; Go extract+index+search; resolution + graph + synth | *(already mirrors CBM's extract→build→resolve spine with rayon)* |
+| **M3 — MCP serve (mode 1)** | ✅ done | `rmcp` server, 4-tool surface, `buildContext`, explore budgets | camelCase FTS pre-split (CBM); explicit confidence ladder + candidate-count penalty in resolution (CBM) |
+| **M4 — widen languages** | ⬜ | TS/JS, Python, Rust extractors + frameworks + synthesizers | hybrid table-driven + per-language-hook extractor model (CBM breadth × CG depth); **per-language type-resolution pass, Go first** (CBM precision) |
+| **M4.5 — incremental + watch** | ⬜ [insert] | — | git-status + content-hash incremental indexing (CBM/CG); `notify` watcher (CG) |
+| **M5 — learned layer (mode 2)** | ⬜ | `fastembed`, KB, RRF fusion, capture/distill, install | wire `markStale` on changed `ref_files` (fixes CW's inert staleness, reuses M4.5 hashing); miss-driven capture from `kb_query_log` (CW gap) |
+| **M5.5 — overview/similarity** | ⬜ [insert] | — | Leiden communities + `get_architecture` (CBM); MinHash/LSH `SIMILAR_TO` (CBM) |
+| **M6 — bindings + distribution** | ⬜ | napi-rs TS bindings; `curl \| sh` | single static binary + signed releases + SBOM + path containment + shell-arg validation (CBM security discipline) |
+
+### M0 · Toolchain + scaffold ✅ DONE
+Cargo workspace + 5 crate skeletons; `rusqlite` `bundled` with **FTS5 proven**
+(`CREATE VIRTUAL TABLE … USING fts5` test passes on a stock toolchain);
+`schema.sql` ported verbatim (nodes/edges/files/unresolved_refs/nodes_fts +
+triggers + `edges.provenance`).
+
+### M1 · Extraction MVP (Go) ✅ DONE
+`LanguageExtractor` trait (partial) + Go extractor (`tree-sitter-go`), `ignore`
+walk with `DEFAULT_IGNORE_DIRS`, node/edge model, store, FTS `bm25` search,
+`rayon` parallel extraction. `node_id()` byte-compatible with the TS scheme.
+
+### M2 · Resolution + graph (Go) ✅ DONE
+Go cross-package import resolution (0.9) → name-matcher → 3 synthesizer passes
+(cross-file `contains`, implicit `implements`, interface override —
+`Heuristic`-tagged). `callers`/`callees`/`find_path` traversal. Verified
+end-to-end on a live Go repo.
+
+### M3 · MCP server, mode 1 (`codegraph` binary) ✅ DONE — the binary is agent-usable
+The single highest-leverage step: the binary now serves an MCP surface and builds
+context. `context/` (buildContext + explore), `search/query_utils` (lexical
+ranking), the `name_split` FTS column + confidence ladder in resolution, and
+`mcp.rs` (rmcp stdio server, 4 tools) all landed and are k8s-gated (see the status
+banner above).
+- **`buildContext` equivalent (CG)** — port `codegraph/src/context/index.ts` →
+  `codegraph-core/src/context/`. Commodity lexical ranking (no vectors): identifier
+  extraction → exact-name + co-location boost → stem/prefix variants → FTS per
+  term → test-file dampening → hub (dominant-file) boost → multi-term co-occurrence
+  re-rank → CamelCase-boundary LIKE → import→def resolution → graph expansion
+  (type-hierarchy + BFS depth 1) → multi-stage token budget (maxNodes, per-file
+  diversity cap, non-production ≤15%, edge recovery) → markdown with a `## Call
+  paths` section annotating synthesized hops inline.
+- **`rmcp` stdio server, 4-tool CG surface (CG)** — `codegraph_explore` (PRIMARY,
+  symbol-bag→flow), `codegraph_node` (full body + caller/callee trail, every
+  overload in one call), `codegraph_search`, `codegraph_callers`.
+  **Success-shaped errors** (`isError` only for path refusals/real malfunctions);
+  unindexed workspace → empty `tools/list` + "inactive" instructions;
+  single-source guidance in MCP `initialize`; **size-scaled explore budget**
+  (call-count + char/file monotonic with file count, under ~25K inline cap).
+  *Decision:* default to CG's "indexing is the user's call" (not CBM auto-index);
+  add opt-in `--auto-index`.
+- **[insert] Resolution polish (CBM)** — in `name_matcher.rs`: explicit confidence
+  ladder (import_map 0.95, same_module 0.90, import_map_suffix 0.85, unique_name
+  0.75, suffix_match 0.55, fuzzy 0.40/0.30) stored on the edge; candidate-count
+  penalty for high-fan-out names + test-path deprioritization; a **camelCase/snake
+  pre-split scalar function** for FTS so `getUserById` matches `get`/`user`/`by`/`id`.
+- *Done:* benchmark harness drives the Rust MCP; **structural-cold recall matches
+  TS**; the k8s hero question (`scheduler-cycle`) answered in ≤1 explore call, 0
+  Read/Grep; single binary runs with no Node and no FTS5 cliff.
+
+### M4 · More languages (breadth without losing depth) ⬜
+- **Hybrid extractor model (CBM breadth × CG depth)** — a generic
+  node-type-table-driven core (`extraction/engine.rs`, exists) driven by
+  per-language `LanguageSpec` data tables (cheap breadth, CBM-style: a quirk-free
+  language = one data table) + an optional per-language `LanguageExtractor` trait
+  widened toward CG's ~40 hooks (`pre_parse`, `classify_class_node`,
+  `get_receiver_type`, `get_return_type`, `classify_method_node`, `visit_node`).
+- Port order by ROI: **TS/JS → Python → Rust → Java → C/C++**.
+- **[insert] Per-language type-resolution pass (CBM — biggest precision lever).**
+  After base extraction, a bounded per-language type pass resolving what
+  name-matching can't: **Go first** (we already infer receiver types — build a
+  `(receiver_type, method_name)→def` index), then C/C++ (pointer indirection,
+  implicit `this`) and TS (typed receivers, overloads). Model on CBM's
+  `CBMTypeRegistry`/`score_overload_match` but scoped — start with receiver +
+  overload resolution (most of the gain); admit type-resolved edges ahead of the
+  name cascade (CBM's 0.6 confidence floor), provenance-tagged.
+- **Framework resolvers + synthesizers (CG moat)** — port incrementally,
+  ROI-ordered, each gated by the §5 bar. Synthesizers first (they connect flows
+  that break): interface-impl, event-emitter, react-render, jsx-render,
+  flutter-build, cpp-override. Then frameworks (Express/NestJS, Django/Flask/
+  FastAPI, Rails, Spring) emitting `route`/`component` nodes + `claimsReference()`.
+- *Done:* per-language node/edge counts within ±5% of TS CodeGraph on a shared
+  repo; the `add-lang` skill's 3-repo validation passes; Go single-candidate
+  call-resolution share rises vs the name-matching baseline.
+
+### M4.5 · Incremental indexing + watch ⬜ [insert] (CBM/CG)
+Today the port does full re-index only (`index_repo` always `clear()`s;
+`files.content_hash` exists but is unused). Table stakes for "stays installed."
+- **Change detection** — `git status --porcelain` + `git rev-parse HEAD` (CBM's
+  cheap portable approach) and/or per-file **sha256+mtime+size** diff vs the
+  `files` table; re-extract only changed files; **scope resolution to refs from
+  changed files** (CG's `getUnresolvedReferencesByFiles`).
+- **Watcher** — the `notify` crate, debounced ~2s (CG), off by default.
+- **Staleness banner** in MCP responses for pending files (CG).
+- *Done:* editing 1 file in k8s re-indexes in <2s; full-index result unchanged vs
+  from-scratch.
+
+### M5 · Learned layer, mode 2 (`codewalk` binary) ⬜ — the half CBM lacks
+`codewalk-kb`: `fastembed` MiniLM-L6-v2 (384-d, pre-warmed), KB store
+(`.codewalk/kb.db`, schema ported verbatim), fusion (`searchVector(8)` ⊕
+`searchFts(8)` → RRF k=60 + 0.1·confidence → always also fetch structural
+`buildContext` → miss <0.45 → render `## Learned knowledge` + `## Structural
+context`, **never worse than structural**), capture (transcript miner +
+discovery-cost ranking + `claude -p` distill + heuristic fallback + dedupe ≥0.9 +
+watermark), `codewalk_ask`/`learn`/`status` tools, `update`, `install`
+(**local scope** by default — the hard-won lesson).
+- **[insert] Fix CW's known gaps while porting:** wire **`markStale`** (CW's is
+  inert) — on incremental re-index (M4.5), diff a KB entry's `ref_files` mtimes vs
+  `created_at`, set `stale=1`, surface the "⚠️ may be outdated" flag (already
+  rendered); **miss-driven capture** — consult `kb_query_log` misses in `update()`
+  to prioritize mining; swap brute-force cosine for **`sqlite-vec`** once the KB
+  grows past low-thousands.
+- *Done:* reproduce the k8s result from the Rust binary — structural ~0.32 → fused
+  ~0.87; hero question 5× fewer tool calls.
+
+### M5.5 · Overview & similarity ⬜ [insert] (CBM) — *medium priority*
+Powers onboarding / "explain this subsystem" / "where are the duplicates" answers
+our stack can't currently give; well-bounded ports.
+- **Leiden community detection** (CBM uses Leiden, better than the paper's Louvain)
+  over the CALLS graph → community nodes + a `get_architecture`-style overview
+  tool; cap ~8000 nodes for interactivity.
+- **MinHash + LSH** over normalized AST leaf trigrams (XXH3 via `xxhash-rust`),
+  Jaccard ≥0.95 → `SIMILAR_TO` edges for clone detection.
+- *Done:* `get_architecture` on k8s yields coherent subsystem clusters; MinHash
+  finds known duplicate handlers.
+
+### M6 · TS bindings + distribution ⬜ (CBM security discipline)
+`codegraph-node` (napi-rs) → publish `@codewalk/codegraph-native` with prebuilds;
+optionally swap the TS Codewalk's `@colbymchenry/codegraph` dependency for it.
+`curl | sh` single-binary install for both binaries.
+- **[insert] Security discipline to adopt from CBM** (cheap, high-trust):
+  `canonicalize` **path containment** on the code-snippet tool (refuse outside
+  project root); **shell-arg validation** before any `claude -p`/git shell-out
+  (reject metacharacters — matters since CW reads `~/.claude` transcripts);
+  **signed releases** (cosign/sigstore) + **SBOM** (CycloneDX) + checksums;
+  **transcript-privacy gate** (opt-in mining, secret redaction, local-only).
+
+> **Prioritized "do this next" (by leverage):** M3 (MCP + buildContext) → M4 TS/JS
+> + Python → M4.5 incremental → M5 learned layer → M4 Go type-resolution pass →
+> M4 synthesizer/framework port → M6 distribution+security → M5.5 Leiden+MinHash.
+> M0–M2 are done; the high-confidence near-term goal is **M3 (Go-only codegraph in
+> Rust, FTS5-clean, agent-usable, benchmarked)**.
 
 ---
 
@@ -229,7 +390,10 @@ highest-value coverage first (Go → the k8s benchmark), then widen.**
 
 ---
 
-## 8. First-session checklist (M0)
+## 8. First-session checklist (M0) — ✅ HISTORICAL (done)
+
+*This was the M0 bootstrap checklist; M0–M2 are complete. To start the **next**
+session (M3 onward), use [`kickoff-prompt-m3.md`](kickoff-prompt-m3.md) instead.*
 
 1. Install Rust: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
    (Rust is **not** installed on this machine yet).
