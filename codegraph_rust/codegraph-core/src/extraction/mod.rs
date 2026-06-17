@@ -185,5 +185,11 @@ fn extract_one(repo_root: &Path, rel: &str) -> Option<FileOutput> {
 
 /// Languages with a ported extractor (for status/reporting).
 pub fn ported_languages() -> &'static [Language] {
-    &[Language::Go]
+    &[
+        Language::Go,
+        Language::Typescript,
+        Language::Tsx,
+        Language::Javascript,
+        Language::Jsx,
+    ]
 }

@@ -172,7 +172,13 @@ impl<'a> Engine<'a> {
             self.extract_class(node, NodeKind::Class);
             skip_children = true;
         } else if ex.method_types().contains(&kind) {
-            self.extract_method(node);
+            // TS/JS class fields: a function-valued field is a method, a plain
+            // field is a property (classify_method_node demotes the latter).
+            if ex.classify_method_node(node) == Some(NodeKind::Property) {
+                self.extract_property(node);
+            } else {
+                self.extract_method(node);
+            }
             skip_children = true;
         } else if ex.interface_types().contains(&kind) {
             self.extract_interface(node);
@@ -298,15 +304,39 @@ impl<'a> Engine<'a> {
     // --- Concept extractors ---
 
     fn extract_function(&mut self, node: TsNode<'_>) {
+        self.extract_function_named(node, None);
+    }
+
+    /// `name_override` is supplied for object-literal function members the caller
+    /// resolved itself (`{ fetchUser: () => {} }` → a function named `fetchUser`).
+    fn extract_function_named(&mut self, node: TsNode<'_>, name_override: Option<String>) {
         let ex = self.extractor;
         // A function_item that actually has a receiver (Rust impl) is a method.
-        if ex.get_receiver_type(node, self.source).is_some() {
+        if name_override.is_none() && ex.get_receiver_type(node, self.source).is_some() {
             self.extract_method(node);
             return;
         }
-        let name = extract_name(node, self.source, ex);
-        if name == "<anonymous>" {
-            if let Some(body) = child_by_field(node, ex.body_field()) {
+        let mut name = name_override
+            .clone()
+            .unwrap_or_else(|| extract_name(node, self.source, ex));
+        // Arrow/function expressions assigned to a variable take the declarator's
+        // name (`export const useAuth = () => {…}` → `useAuth`).
+        if name_override.is_none()
+            && name == "<anonymous>"
+            && matches!(node.kind(), "arrow_function" | "function_expression")
+        {
+            if let Some(parent) = node.parent() {
+                if parent.kind() == "variable_declarator" {
+                    if let Some(vn) = child_by_field(parent, "name") {
+                        name = node_text(vn, self.source).to_string();
+                    }
+                }
+            }
+        }
+        if name == "<anonymous>" || name.is_empty() {
+            // Don't emit a node for the anonymous wrapper, but still walk its body
+            // (module wrappers / IIFEs hold named inner functions + calls).
+            if let Some(body) = self.get_body(node) {
                 self.visit_function_body(body);
             }
             return;
@@ -323,10 +353,39 @@ impl<'a> Engine<'a> {
         };
         self.extract_type_annotations(node, &id);
         self.push_scope(id.clone(), NodeKind::Function, name);
-        if let Some(body) = child_by_field(node, ex.body_field()) {
+        if let Some(body) = self.get_body(node) {
             self.visit_function_body(body);
         }
         self.scopes.pop();
+    }
+
+    /// The function/method body — `resolve_body` hook (arrow-field bodies) else
+    /// the plain `body` field.
+    fn get_body<'n>(&self, node: TsNode<'n>) -> Option<TsNode<'n>> {
+        self.extractor
+            .resolve_body(node, self.extractor.body_field())
+            .or_else(|| child_by_field(node, self.extractor.body_field()))
+    }
+
+    /// A plain (non-callable) class field → a `property` node (TS/JS
+    /// `public_field_definition`/`field_definition` classified as property).
+    fn extract_property(&mut self, node: TsNode<'_>) {
+        let ex = self.extractor;
+        let name = extract_name(node, self.source, ex);
+        if name == "<anonymous>" || name.is_empty() {
+            return;
+        }
+        let extra = NodeExtra {
+            docstring: preceding_docstring(node, self.source),
+            is_exported: ex.is_exported(node, self.source),
+            ..Default::default()
+        };
+        if let Some(id) = self.create_node(NodeKind::Property, &name, node, extra) {
+            // Field type annotation (`private store: ITextModel`) → references.
+            if let Some(ty) = child_by_field(node, "type") {
+                self.extract_type_refs_from_subtree(ty, &id);
+            }
+        }
     }
 
     fn extract_method(&mut self, node: TsNode<'_>) {
@@ -374,7 +433,7 @@ impl<'a> Engine<'a> {
 
         self.extract_type_annotations(node, &id);
         self.push_scope(id.clone(), NodeKind::Method, name);
-        if let Some(body) = child_by_field(node, ex.body_field()) {
+        if let Some(body) = self.get_body(node) {
             self.visit_function_body(body);
         }
         self.scopes.pop();
@@ -548,8 +607,148 @@ impl<'a> Engine<'a> {
         self.scopes.pop();
     }
 
+    /// TS/JS variable declarations: `variable_declarator` children of a
+    /// `lexical_declaration`/`variable_declaration`. An arrow/function value
+    /// becomes a named function (`const foo = () => {}`); else a variable/constant.
+    fn extract_variable_ts(&mut self, node: TsNode<'_>) {
+        let ex = self.extractor;
+        let kind = if ex.is_const(node) { NodeKind::Constant } else { NodeKind::Variable };
+        let docstring = preceding_docstring(node, self.source);
+        let is_exported = ex.is_exported(node, self.source);
+        for i in 0..node.named_child_count() {
+            let Some(child) = node.named_child(i) else { continue };
+            if child.kind() != "variable_declarator" {
+                continue;
+            }
+            let Some(name_node) = child_by_field(child, "name") else { continue };
+            // Skip destructured patterns (`const { x, y } = …`) — ugly multi-line names.
+            if matches!(name_node.kind(), "object_pattern" | "array_pattern") {
+                continue;
+            }
+            let name = node_text(name_node, self.source).to_string();
+            let value = child_by_field(child, "value");
+            if let Some(v) = value {
+                if matches!(v.kind(), "arrow_function" | "function_expression") {
+                    self.extract_function(v);
+                    continue;
+                }
+            }
+            let signature = value.map(|v| format!("= {}", truncate(node_text(v, self.source), 100)));
+            let extra = NodeExtra {
+                docstring: docstring.clone(),
+                signature,
+                is_exported,
+                ..Default::default()
+            };
+            let vid = self.create_node(kind, &name, child, extra);
+            // Type annotation references (`const x: ITextModel = …`).
+            if let Some(id) = &vid {
+                if let Some(ty) = child_by_field(child, "type") {
+                    self.extract_type_refs_from_subtree(ty, id);
+                }
+            }
+            // Exported const object-of-functions: extract each function-valued
+            // property as a function named by its key (handler maps, store
+            // factories, the LanguageExtractor config objects). Two shapes: the
+            // object as the direct value, or the object RETURNED by an initializer
+            // call (Zustand/Redux/Pinia middleware-wrapped factories).
+            let object_of_fns = value.and_then(|v| match v.kind() {
+                "object" | "object_expression" => Some(v),
+                "call_expression" => self.find_initializer_returned_object(v, 0),
+                _ => None,
+            });
+            let extract_object_methods = is_exported && object_of_fns.is_some();
+
+            // Walk the initializer for calls/instantiations — EXCEPT object
+            // literals (handled below) and the store-factory call whose returned
+            // object we extract method-by-method (walking it would re-visit the
+            // method arrows and mis-attribute their calls to the file scope).
+            if let Some(v) = value {
+                let is_obj = matches!(v.kind(), "object" | "object_expression");
+                let is_factory = extract_object_methods && v.kind() == "call_expression";
+                if !is_obj && !is_factory {
+                    if let Some(id) = vid {
+                        self.push_scope(id, kind, name.clone());
+                        self.visit_function_body(v);
+                        self.scopes.pop();
+                    } else {
+                        self.visit_function_body(v);
+                    }
+                }
+            }
+            if let Some(obj) = object_of_fns {
+                if extract_object_methods {
+                    self.extract_object_literal_functions(obj);
+                }
+            }
+        }
+    }
+
+    /// Function-valued properties of an object literal → function nodes named by
+    /// their key (port of `extractObjectLiteralFunctions`). Handles `key: () => {}`
+    /// / `key: function(){}` pairs and method shorthand `key() {}`.
+    fn extract_object_literal_functions(&mut self, obj: TsNode<'_>) {
+        for i in 0..obj.named_child_count() {
+            let Some(member) = obj.named_child(i) else { continue };
+            match member.kind() {
+                "pair" => {
+                    let (Some(key), Some(value)) =
+                        (child_by_field(member, "key"), child_by_field(member, "value"))
+                    else {
+                        continue;
+                    };
+                    if matches!(value.kind(), "arrow_function" | "function_expression") {
+                        let name = object_key_name(key, self.source);
+                        self.extract_function_named(value, Some(name));
+                    }
+                }
+                "method_definition" => {
+                    if let Some(key) = child_by_field(member, "name") {
+                        let name = object_key_name(key, self.source);
+                        self.extract_function_named(member, Some(name));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The object literal returned by a `call_expression` initializer
+    /// (`create((set, get) => ({...}))`), descending nested call args for
+    /// middleware wrappers (port of `findInitializerReturnedObject`).
+    fn find_initializer_returned_object<'n>(&self, call: TsNode<'n>, depth: u32) -> Option<TsNode<'n>> {
+        if depth > 4 {
+            return None;
+        }
+        let args = child_by_field(call, "arguments")?;
+        for i in 0..args.named_child_count() {
+            let Some(arg) = args.named_child(i) else { continue };
+            match arg.kind() {
+                "arrow_function" | "function_expression" => {
+                    if let Some(obj) = function_returned_object(arg) {
+                        return Some(obj);
+                    }
+                }
+                "call_expression" => {
+                    if let Some(obj) = self.find_initializer_returned_object(arg, depth + 1) {
+                        return Some(obj);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Go variable/const declarations (var/const specs + `:=`).
     fn extract_variable(&mut self, node: TsNode<'_>) {
+        if matches!(
+            self.language,
+            Language::Typescript | Language::Tsx | Language::Javascript | Language::Jsx
+        ) {
+            self.extract_variable_ts(node);
+            return;
+        }
         let docstring = preceding_docstring(node, self.source);
 
         if self.language == Language::Go {
@@ -639,8 +838,25 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Go imports — one `import` node + an `imports` unresolved ref per spec.
+    /// Imports — one `import` node + an `imports` unresolved ref. Generic path via
+    /// the `import_module` hook (TS/JS `import_statement`); Go uses its multi-spec path.
     fn extract_import(&mut self, node: TsNode<'_>) {
+        // Generic single-module import (TS/JS).
+        if let Some((module, signature)) = self.extractor.import_module(node, self.source) {
+            if module.is_empty() {
+                return;
+            }
+            let parent_id = self.scopes.last().map(|s| s.id.clone());
+            let extra = NodeExtra {
+                signature: Some(signature),
+                ..Default::default()
+            };
+            self.create_node(NodeKind::Import, &module, node, extra);
+            if let Some(pid) = parent_id {
+                self.add_unresolved(&pid, &module, ReferenceKind::Edge(EdgeKind::Imports), node);
+            }
+            return;
+        }
         if self.language != Language::Go {
             return;
         }
@@ -825,6 +1041,11 @@ impl<'a> Engine<'a> {
                 continue;
             };
             match child.kind() {
+                // TS/JS: `class A extends B implements C, D` and `interface I extends J`.
+                "class_heritage" | "extends_clause" | "implements_clause"
+                | "extends_type_clause" => {
+                    self.extract_ts_heritage(child, class_id);
+                }
                 "constraint_elem" => {
                     if let Some(tid) = (0..child.named_child_count())
                         .filter_map(|j| child.named_child(j))
@@ -853,16 +1074,60 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Emit `references` refs for the types named in a function/method's
-    /// parameter and result positions (TS `extractTypeAnnotations`, Go path).
-    fn extract_type_annotations(&mut self, node: TsNode<'_>, from_id: &str) {
-        if self.language != Language::Go {
-            return;
+    /// TS/JS class/interface heritage → `extends`/`implements` refs.
+    /// `class_heritage` wraps `extends_clause` (a value expression) and
+    /// `implements_clause` (types); `extends_type_clause` is interface-extends.
+    fn extract_ts_heritage(&mut self, node: TsNode<'_>, class_id: &str) {
+        match node.kind() {
+            "class_heritage" => {
+                for i in 0..node.named_child_count() {
+                    if let Some(child) = node.named_child(i) {
+                        self.extract_ts_heritage(child, class_id);
+                    }
+                }
+            }
+            "extends_clause" | "extends_type_clause" => {
+                // `extends_clause`'s superclass is an expression (`value` field or
+                // first child); `extends_type_clause` holds type(s). Both → extends.
+                let targets: Vec<TsNode> = child_by_field(node, "value")
+                    .map(|v| vec![v])
+                    .unwrap_or_else(|| {
+                        (0..node.named_child_count())
+                            .filter_map(|i| node.named_child(i))
+                            .filter(|c| c.kind() != "type_arguments")
+                            .collect()
+                    });
+                for t in targets {
+                    if let Some(name) = ts_base_type_name(t, self.source) {
+                        self.add_unresolved(class_id, &name, ReferenceKind::Edge(EdgeKind::Extends), t);
+                    }
+                }
+            }
+            "implements_clause" => {
+                for i in 0..node.named_child_count() {
+                    let Some(c) = node.named_child(i) else { continue };
+                    if c.kind() == "type_arguments" {
+                        continue;
+                    }
+                    if let Some(name) = ts_base_type_name(c, self.source) {
+                        self.add_unresolved(class_id, &name, ReferenceKind::Edge(EdgeKind::Implements), c);
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// Emit `references` refs for the types named in a function/method's
+    /// parameter and result positions (port of `extractTypeAnnotations`). Go names
+    /// the return position `result`; TS/JS names it `return_type`.
+    fn extract_type_annotations(&mut self, node: TsNode<'_>, from_id: &str) {
         if let Some(params) = child_by_field(node, "parameters") {
             self.extract_type_refs_from_subtree(params, from_id);
         }
-        if let Some(result) = child_by_field(node, "result") {
+        if let Some(result) =
+            child_by_field(node, "result").or_else(|| child_by_field(node, "return_type"))
+        {
             self.extract_type_refs_from_subtree(result, from_id);
         }
     }
@@ -944,6 +1209,74 @@ impl<'a> Engine<'a> {
 
 fn basename(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// Base type NAME from a TS heritage target — unwrapping `generic_type`
+/// (`Foo<T>` → `Foo`), taking the last segment of a qualified
+/// `member_expression`/`nested_type_identifier` (`ns.Foo` → `Foo`).
+fn ts_base_type_name(node: TsNode<'_>, source: &str) -> Option<String> {
+    match node.kind() {
+        "type_identifier" | "identifier" => {
+            let t = node_text(node, source).trim();
+            (!t.is_empty()).then(|| t.to_string())
+        }
+        "generic_type" => node.named_child(0).and_then(|c| ts_base_type_name(c, source)),
+        "member_expression" | "nested_type_identifier" => child_by_field(node, "property")
+            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
+            .and_then(|c| ts_base_type_name(c, source)),
+        _ => {
+            // Fall back to a descendant type_identifier/identifier.
+            (0..node.named_child_count())
+                .filter_map(|i| node.named_child(i))
+                .find_map(|c| {
+                    matches!(c.kind(), "type_identifier" | "identifier")
+                        .then(|| node_text(c, source).trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+        }
+    }
+}
+
+/// Property-key text with surrounding quotes stripped (`'foo'` → `foo`).
+fn object_key_name(key: TsNode<'_>, source: &str) -> String {
+    node_text(key, source).trim_matches(['\'', '"', '`']).to_string()
+}
+
+/// The object literal a function expression returns — the `=> ({...})` arrow form
+/// (object inside a parenthesized_expression) or `=> { return {...} }` block
+/// (port of `functionReturnedObject`).
+fn function_returned_object<'n>(fn_node: TsNode<'n>) -> Option<TsNode<'n>> {
+    let body = child_by_field(fn_node, "body")?;
+    fn as_object<'n>(n: TsNode<'n>) -> Option<TsNode<'n>> {
+        if matches!(n.kind(), "object" | "object_expression") {
+            return Some(n);
+        }
+        if n.kind() == "parenthesized_expression" {
+            for i in 0..n.named_child_count() {
+                if let Some(inner) = n.named_child(i).and_then(as_object) {
+                    return Some(inner);
+                }
+            }
+        }
+        None
+    }
+    if let Some(direct) = as_object(body) {
+        return Some(direct);
+    }
+    if body.kind() == "statement_block" {
+        for i in 0..body.named_child_count() {
+            let Some(stmt) = body.named_child(i) else { continue };
+            if stmt.kind() != "return_statement" {
+                continue;
+            }
+            for j in 0..stmt.named_child_count() {
+                if let Some(obj) = stmt.named_child(j).and_then(as_object) {
+                    return Some(obj);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn truncate(s: &str, max: usize) -> String {

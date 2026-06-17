@@ -59,6 +59,32 @@ pub fn has_extractor(language: Language) -> bool {
 pub fn grammar_for(language: Language) -> Option<TsLanguage> {
     match language {
         Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
+        Language::Typescript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        Language::Tsx => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+        Language::Javascript | Language::Jsx => Some(tree_sitter_javascript::LANGUAGE.into()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tree_sitter::Parser;
+
+    /// ABI smoke test: the TS grammar (0.23) loads + parses under tree-sitter 0.25.
+    #[test]
+    fn ts_grammar_loads_and_parses() {
+        for (lang, src, want) in [
+            (Language::Typescript, "export function foo(x: number): number { return x; }", "function_declaration"),
+            (Language::Tsx, "const App = () => <div/>;", "lexical_declaration"),
+            (Language::Javascript, "class C { m() { return 1; } }", "class_declaration"),
+        ] {
+            let grammar = grammar_for(lang).expect("grammar linked");
+            let mut p = Parser::new();
+            p.set_language(&grammar).expect("set_language (ABI compatible)");
+            let tree = p.parse(src, None).expect("parses");
+            let sexp = tree.root_node().to_sexp();
+            assert!(sexp.contains(want), "{:?}: expected {} in {}", lang, want, sexp);
+        }
     }
 }
