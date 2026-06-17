@@ -317,7 +317,20 @@ banner above).
 > (82% → 89%)**: **structural edges now EXACT** (calls 4,278/4,284, contains/extends/
 > implements 100%), imports 1,245/1,469 (85%). Remaining gap is **type-reference
 > completeness** (references 54% — function/method body type usages, interface
-> members, class generics), a separate refinement. Next: Python → Rust extractors.
+> members, class generics), a separate refinement.
+>
+> **M4c done: Python extractor.** `languages/python.rs` + engine handling for
+> Python's `call`/`attribute` method names, `assignment` variables, `import`/`from
+> … import` nodes, and `class Foo(Base)` inheritance. Grammar `tree-sitter-python`
+> 0.25. **Parity on the asyncio stdlib package (33 files): nodes EXACT 1,536 = 1,536**
+> (method 879✓ import 276✓ variable 122✓ function 121✓ class 105✓). Edges 3,447 vs
+> 3,720 (93%) — contains 100%, calls 1,528/1,584 (96%), extends 86/85 (exact). Gap =
+> Python from-import per-symbol resolution + instantiates promotion + type-annotation
+> references (Python types are `identifier`, not `type_identifier`) — the same
+> resolution follow-on. **Go re-verified: exactly 167,101 Go nodes** (the k8s total
+> rose +16 only because the new extractor now picks up k8s's stray Python tooling
+> files — multi-language coverage on a mixed repo, not a Go change). Next: Rust
+> extractor, then the resolution-completeness pass (imports/type-refs) across TS+Python.
 
 - **Hybrid extractor model (CBM breadth × CG depth)** — a generic
   node-type-table-driven core (`extraction/engine.rs`, exists) driven by

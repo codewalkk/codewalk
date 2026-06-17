@@ -191,5 +191,6 @@ pub fn ported_languages() -> &'static [Language] {
         Language::Tsx,
         Language::Javascript,
         Language::Jsx,
+        Language::Python,
     ]
 }
