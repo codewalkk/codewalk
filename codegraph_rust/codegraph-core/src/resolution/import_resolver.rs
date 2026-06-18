@@ -156,6 +156,119 @@ pub fn resolve_ts_import(g: &Graph, r: &UnresolvedReference) -> Option<Resolved>
     })
 }
 
+// ---------------------------------------------------------------------------
+// Rust `use` path resolution (port of resolveRustPathReference + helpers).
+// ---------------------------------------------------------------------------
+
+fn pjoin(dir: &str, seg: &str) -> String {
+    if dir.is_empty() {
+        seg.to_string()
+    } else {
+        format!("{}/{}", dir, seg)
+    }
+}
+
+/// The crate root directory of `from_file` — the nearest ancestor dir holding
+/// `lib.rs`/`main.rs` (port of `rustCrateRootDir`). Repo-relative.
+fn rust_crate_root_dir(from_file: &str, g: &Graph) -> Option<String> {
+    let mut dir = dirname(from_file).to_string();
+    for _ in 0..64 {
+        if g.file_indexed(&pjoin(&dir, "lib.rs")) || g.file_indexed(&pjoin(&dir, "main.rs")) {
+            return Some(dir);
+        }
+        if dir.is_empty() {
+            return None;
+        }
+        dir = dirname(&dir).to_string();
+    }
+    None
+}
+
+/// The module directory of `from_file` (port of `rustSelfModuleDir`): mod.rs /
+/// lib.rs / main.rs own their dir; `foo.rs`'s submodules live under `foo/`.
+fn rust_self_module_dir(from_file: &str) -> String {
+    let base = from_file.rsplit('/').next().unwrap_or(from_file);
+    let dir = dirname(from_file);
+    if matches!(base, "mod.rs" | "lib.rs" | "main.rs") {
+        dir.to_string()
+    } else {
+        pjoin(dir, base.trim_end_matches(".rs"))
+    }
+}
+
+/// Walk module segments down from `start_dir`, mapping each to `<seg>.rs` or
+/// `<seg>/mod.rs`. Returns the leaf module's file (port of `resolveUnder`).
+fn resolve_under(start_dir: Option<String>, rest: &[&str], g: &Graph) -> Option<String> {
+    let mut dir = start_dir?;
+    let mut target: Option<String> = None;
+    for &seg in rest {
+        if matches!(seg, "self" | "crate" | "super") {
+            continue;
+        }
+        let as_file = pjoin(&dir, &format!("{}.rs", seg));
+        let as_mod = pjoin(&pjoin(&dir, seg), "mod.rs");
+        if g.file_indexed(&as_file) {
+            target = Some(as_file);
+        } else if g.file_indexed(&as_mod) {
+            target = Some(as_mod);
+        } else {
+            return None;
+        }
+        dir = pjoin(&dir, seg);
+    }
+    target
+}
+
+fn resolve_rust_module_file(segments: &[&str], from_file: &str, g: &Graph) -> Option<String> {
+    let first = *segments.first()?;
+    match first {
+        "crate" => resolve_under(rust_crate_root_dir(from_file, g), &segments[1..], g),
+        "self" => resolve_under(Some(rust_self_module_dir(from_file)), &segments[1..], g),
+        "super" => {
+            let supers = segments.iter().take_while(|s| **s == "super").count();
+            let mut dir = Some(rust_self_module_dir(from_file));
+            for _ in 0..supers {
+                dir = dir.map(|d| dirname(&d).to_string());
+            }
+            resolve_under(dir, &segments[supers..], g)
+        }
+        // Bare path: 2018 self-relative first, then crate-relative; external
+        // crates (serde::…) miss both and fall through to name matching.
+        _ => resolve_under(Some(rust_self_module_dir(from_file)), segments, g)
+            .or_else(|| resolve_under(rust_crate_root_dir(from_file, g), segments, g)),
+    }
+}
+
+/// Resolve a Rust `use` path ref (`crate::types::Node`) to the leaf symbol's
+/// definition in the resolved module file (port of `resolveRustPathReference`).
+pub fn resolve_rust_path(g: &Graph, r: &UnresolvedReference) -> Option<Resolved> {
+    let segments: Vec<&str> = r.reference_name.split("::").filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    let leaf = *segments.last().unwrap();
+    let mod_segs = &segments[..segments.len() - 1];
+    let from_file = r.file_path.as_deref().unwrap_or("");
+    let file = resolve_rust_module_file(mod_segs, from_file, g)?;
+    if file == from_file {
+        return None;
+    }
+    use crate::types::NodeKind::*;
+    for &i in g.nodes_in_file(&file) {
+        let n = g.node(i);
+        if n.name == leaf
+            && matches!(n.kind, Function | Struct | Enum | Trait | TypeAlias | Constant | Method | Class | Interface)
+        {
+            return Some(Resolved {
+                target_id: n.id.clone(),
+                confidence: ladder::IMPORT_MAP,
+                resolved_by: "import",
+            });
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
