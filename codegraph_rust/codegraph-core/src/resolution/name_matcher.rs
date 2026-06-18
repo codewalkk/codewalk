@@ -388,12 +388,76 @@ fn match_by_exact_name(graph: &Graph, r: &UnresolvedReference) -> Option<Resolve
     })
 }
 
+/// Resolve a `function_ref` (a function used as a value) — port of
+/// `matchFunctionRef`. Bare identifiers in TS/JS/Python match FUNCTIONS only
+/// (methods need a receiver); Go/Rust also allow methods. Same-file definition
+/// wins (first by line); cross-file resolves ONLY when unambiguous (unique-or-drop).
+pub fn match_function_ref(graph: &Graph, r: &UnresolvedReference) -> Option<Resolved> {
+    let name = &r.reference_name;
+    // `this.<member>` is class-scoped — not resolved by bare name matching.
+    if name.starts_with("this.") {
+        return None;
+    }
+    let l = lang(r);
+    let bare_fn_only = matches!(
+        l,
+        Language::Typescript | Language::Tsx | Language::Javascript | Language::Jsx | Language::Python
+    );
+    let cands: Vec<usize> = graph
+        .nodes_by_name(name)
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let n = graph.node(i);
+            let kind_ok = n.kind == NodeKind::Function || (!bare_fn_only && n.kind == NodeKind::Method);
+            kind_ok && same_language_family(n.language, l) && n.id != r.from_node_id
+        })
+        .collect();
+    if cands.is_empty() {
+        return None;
+    }
+    // Same-file definition wins (first by start line, for determinism).
+    let same_file: Vec<usize> = cands
+        .iter()
+        .copied()
+        .filter(|&i| graph.node(i).file_path == file(r))
+        .collect();
+    if !same_file.is_empty() {
+        let target = *same_file.iter().min_by_key(|&&i| graph.node(i).start_line).unwrap();
+        return Some(Resolved {
+            target_id: graph.node(target).id.clone(),
+            confidence: if same_file.len() == 1 { 0.95 } else { 0.90 },
+            resolved_by: "function-ref",
+        });
+    }
+    // Cross-file: only an unambiguous match resolves.
+    if cands.len() == 1 {
+        return Some(Resolved {
+            target_id: graph.node(cands[0]).id.clone(),
+            confidence: 0.8,
+            resolved_by: "function-ref",
+        });
+    }
+    None
+}
+
 /// Port of `applyLanguageGate` (references/imports regimes; calls pass through).
 fn apply_language_gate(graph: &Graph, cands: &[usize], r: &UnresolvedReference) -> Vec<usize> {
     use crate::types::{EdgeKind, ReferenceKind};
     let l = lang(r);
     match r.reference_kind {
-        ReferenceKind::Edge(EdgeKind::References) | ReferenceKind::FunctionRef => cands
+        // A function-as-value matches function/method nodes ONLY (matchFunctionRef),
+        // within the same language family.
+        ReferenceKind::FunctionRef => cands
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let n = graph.node(i);
+                matches!(n.kind, NodeKind::Function | NodeKind::Method)
+                    && same_language_family(n.language, l)
+            })
+            .collect(),
+        ReferenceKind::Edge(EdgeKind::References) => cands
             .iter()
             .copied()
             .filter(|&i| same_language_family(graph.node(i).language, l))

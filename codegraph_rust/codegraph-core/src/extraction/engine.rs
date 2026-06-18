@@ -66,6 +66,9 @@ struct Engine<'a> {
     unresolved: Vec<UnresolvedReference>,
     scopes: Vec<Scope>,
     updated_at: i64,
+    /// Function-as-value candidates (#756): (candidate, from-node-id). Gated and
+    /// flushed to `function_ref` refs after the walk, when the file is complete.
+    fn_refs: Vec<(crate::extraction::fn_ref::FnRefCandidate, String)>,
 }
 
 /// Parse and extract one source file. Returns an empty-but-ok result (with an
@@ -117,6 +120,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Extrac
         unresolved: Vec::new(),
         scopes: Vec::new(),
         updated_at: 0,
+        fn_refs: Vec::new(),
     };
     engine.run(tree.root_node());
 
@@ -152,7 +156,78 @@ impl<'a> Engine<'a> {
 
         self.visit_node(root);
 
+        // Gate + flush function-as-value candidates while the file's nodes and
+        // import refs are complete and the file scope is still on the stack.
+        self.flush_fn_refs();
+
         self.scopes.pop();
+    }
+
+    /// Capture function-as-value candidates from a dispatched container node,
+    /// attributed to the current scope.
+    fn maybe_capture_fn_refs(&mut self, node: TsNode<'_>) {
+        let Some(rule) = crate::extraction::fn_ref::dispatch_rule(self.language, node.kind()) else {
+            return;
+        };
+        let Some(from) = self.scopes.last().map(|s| s.id.clone()) else {
+            return;
+        };
+        for cand in crate::extraction::fn_ref::capture_candidates(node, &rule, self.language, self.source) {
+            self.fn_refs.push((cand, from.clone()));
+        }
+    }
+
+    /// Gate captured candidates and push survivors as `function_ref` refs: a name
+    /// must be a function/method DEFINED IN THIS FILE or one this file imports
+    /// (everything else — locals, params, fields — is dropped). Port of
+    /// `flushFnRefCandidates` (the common gate; no C/PHP/C++ special cases).
+    fn flush_fn_refs(&mut self) {
+        if self.fn_refs.is_empty() {
+            return;
+        }
+        let candidates = std::mem::take(&mut self.fn_refs);
+        if crate::search::query_utils::is_generated_file(self.file_path) {
+            return;
+        }
+        let defined_here: std::collections::HashSet<&str> = self
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+            .map(|n| n.name.as_str())
+            .collect();
+        let imported: std::collections::HashSet<&str> = self
+            .unresolved
+            .iter()
+            .filter(|r| r.reference_kind == ReferenceKind::Edge(EdgeKind::Imports))
+            .map(|r| r.reference_name.as_str())
+            .collect();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut refs: Vec<UnresolvedReference> = Vec::new();
+        for (c, from) in &candidates {
+            // `this.<member>` always flushes (resolution is class-scoped); a bare
+            // name must be defined-here or imported.
+            if !c.name.starts_with("this.")
+                && !defined_here.contains(c.name.as_str())
+                && !imported.contains(c.name.as_str())
+            {
+                continue;
+            }
+            let key = format!("{}|{}", from, c.name);
+            if !seen.insert(key) {
+                continue;
+            }
+            refs.push(UnresolvedReference {
+                from_node_id: from.clone(),
+                reference_name: c.name.clone(),
+                reference_kind: ReferenceKind::FunctionRef,
+                line: c.line,
+                col: c.col,
+                file_path: Some(self.file_path.to_string()),
+                language: Some(self.language),
+                candidates: None,
+            });
+        }
+        self.unresolved.extend(refs);
     }
 
     /// The main dispatch ladder (TS `visitNode`, Go-relevant branches).
@@ -160,6 +235,9 @@ impl<'a> Engine<'a> {
         let kind = node.kind();
         let ex = self.extractor;
         let mut skip_children = false;
+
+        // Function-as-value candidates in this container (args/assignment/initializer).
+        self.maybe_capture_fn_refs(node);
 
         if ex.function_types().contains(&kind) {
             if self.is_inside_class_like() && ex.method_types().contains(&kind) {
@@ -1381,6 +1459,9 @@ impl<'a> Engine<'a> {
     fn visit_function_body(&mut self, body: TsNode<'_>) {
         let kind = body.kind();
         let ex = self.extractor;
+
+        // Function-as-value candidates inside the body (callbacks passed as args, …).
+        self.maybe_capture_fn_refs(body);
 
         if ex.call_types().contains(&kind) {
             self.extract_call(body);
