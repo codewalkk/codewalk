@@ -131,3 +131,32 @@ impl LanguageExtractor for GoExtractor {
         Some(last.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::extraction::extract_file;
+    use crate::types::{EdgeKind, Language, ReferenceKind};
+
+    #[test]
+    fn go_type_resolution_substitutes_receiver_type() {
+        // A method call on a typed parameter/receiver resolves to `Type::Method`
+        // (the Go type-resolution pass) rather than the bare `var.method`.
+        let src = r#"
+package sched
+type Queue struct{}
+func (q *Queue) Pop() {}
+func run(q *Queue) {
+    q.Pop()
+}
+"#;
+        let r = extract_file("s.go", src, Language::Go);
+        let calls: Vec<&str> = r
+            .unresolved_references
+            .iter()
+            .filter(|u| u.reference_kind == ReferenceKind::Edge(EdgeKind::Calls))
+            .map(|u| u.reference_name.as_str())
+            .collect();
+        assert!(calls.contains(&"Queue::Pop"), "expected Queue::Pop, got {:?}", calls);
+        assert!(!calls.contains(&"q.Pop"), "should not emit the un-typed q.Pop: {:?}", calls);
+    }
+}

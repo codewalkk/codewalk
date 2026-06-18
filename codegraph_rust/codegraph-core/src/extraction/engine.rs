@@ -72,6 +72,10 @@ struct Engine<'a> {
     /// Generated file (path-based) — function-ref capture is skipped entirely
     /// (its candidates are noise), computed once instead of per-flush.
     is_generated: bool,
+    /// Go type-resolution pass: receiver/parameter variable → bare type name for
+    /// the function currently being walked. Lets `recv.Method()` resolve to the
+    /// precise `Type::Method` instead of fuzzy name matching. Empty for non-Go.
+    go_local_types: std::collections::HashMap<String, String>,
 }
 
 /// Parse and extract one source file. Returns an empty-but-ok result (with an
@@ -125,6 +129,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Extrac
         updated_at: 0,
         fn_refs: Vec::new(),
         is_generated: crate::search::query_utils::is_generated_file(file_path),
+        go_local_types: std::collections::HashMap::new(),
     };
     engine.run(tree.root_node());
 
@@ -485,10 +490,29 @@ impl<'a> Engine<'a> {
         };
         self.extract_type_annotations(node, &id);
         self.push_scope(id.clone(), NodeKind::Function, name);
+        let saved = self.enter_go_locals(node);
         if let Some(body) = self.get_body(node) {
             self.visit_function_body(body);
         }
+        self.go_local_types = saved;
         self.scopes.pop();
+    }
+
+    /// Go type-resolution: replace `go_local_types` with the receiver + parameter
+    /// variable→type bindings of the function `node` (for the duration of its body
+    /// walk), returning the previous map to restore afterward. No-op for non-Go.
+    fn enter_go_locals(&mut self, node: TsNode<'_>) -> std::collections::HashMap<String, String> {
+        if self.language != Language::Go {
+            return std::collections::HashMap::new();
+        }
+        let mut m = std::collections::HashMap::new();
+        if let Some(recv) = child_by_field(node, "receiver") {
+            collect_go_param_types(recv, self.source, &mut m);
+        }
+        if let Some(params) = child_by_field(node, "parameters") {
+            collect_go_param_types(params, self.source, &mut m);
+        }
+        std::mem::replace(&mut self.go_local_types, m)
     }
 
     /// The function/method body — `resolve_body` hook (arrow-field bodies) else
@@ -565,9 +589,11 @@ impl<'a> Engine<'a> {
 
         self.extract_type_annotations(node, &id);
         self.push_scope(id.clone(), NodeKind::Method, name);
+        let saved = self.enter_go_locals(node);
         if let Some(body) = self.get_body(node) {
             self.visit_function_body(body);
         }
+        self.go_local_types = saved;
         self.scopes.pop();
     }
 
@@ -1322,6 +1348,10 @@ impl<'a> Engine<'a> {
                             let rname = node_text(recv, self.source);
                             callee = if SKIP.contains(&rname) {
                                 method.to_string()
+                            } else if let Some(ty) = self.go_local_types.get(rname) {
+                                // Go type resolution: the receiver var's inferred type
+                                // turns `q.Pop()` into the precise `Queue::Pop`.
+                                format!("{}::{}", ty, method)
                             } else {
                                 format!("{}.{}", rname, method)
                             };
@@ -1670,6 +1700,42 @@ fn ts_base_type_name(node: TsNode<'_>, source: &str) -> Option<String> {
                         .filter(|s| !s.is_empty())
                 })
         }
+    }
+}
+
+/// Collect (var → bare type) bindings from a Go `parameter_list` (receiver or
+/// params). `parameter_declaration` holds one or more name identifiers + a `type`
+/// field; `func(x, y *Foo)` binds both x and y to `Foo`.
+fn collect_go_param_types(list: TsNode<'_>, source: &str, m: &mut std::collections::HashMap<String, String>) {
+    for i in 0..list.named_child_count() {
+        let Some(pd) = list.named_child(i) else { continue };
+        if pd.kind() != "parameter_declaration" {
+            continue;
+        }
+        let Some(ty_node) = child_by_field(pd, "type") else { continue };
+        let Some(ty) = go_bare_type(ty_node, source) else { continue };
+        // Names are the identifier children other than the type subtree.
+        for j in 0..pd.named_child_count() {
+            let Some(c) = pd.named_child(j) else { continue };
+            if c.id() != ty_node.id() && c.kind() == "identifier" {
+                m.insert(node_text(c, source).to_string(), ty.clone());
+            }
+        }
+    }
+}
+
+/// The bare named type of a Go type subtree: `*Foo`/`Foo` → `Foo`, `pkg.Foo` →
+/// `Foo` (last segment). Slices/maps/funcs/channels/arrays yield None (no single
+/// receiver type to key on).
+fn go_bare_type(node: TsNode<'_>, source: &str) -> Option<String> {
+    match node.kind() {
+        "type_identifier" => Some(node_text(node, source).trim().to_string()),
+        "pointer_type" => node.named_child(0).and_then(|c| go_bare_type(c, source)),
+        "qualified_type" => child_by_field(node, "name")
+            .or_else(|| node.named_child(node.named_child_count().saturating_sub(1)))
+            .and_then(|c| go_bare_type(c, source)),
+        "generic_type" => node.named_child(0).and_then(|c| go_bare_type(c, source)),
+        _ => None,
     }
 }
 

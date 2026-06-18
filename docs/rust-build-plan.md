@@ -398,6 +398,22 @@ banner above).
 > throughout. The breadth+resolution port (extractors + import/type/function-ref
 > resolution) is complete for Go/TS/JS/Python/Rust. Next: the Go type-resolution
 > pass (the biggest CBM precision lever), then synthesizers + framework resolvers.
+>
+> **M4h done: Go type-resolution pass (CBM precision lever).** A bounded
+> receiver/parameter type-inference pass: when walking a Go function, bind its
+> receiver + parameter variables to their bare types (`func (q *Queue) … (s
+> *Scheduler)` → q:Queue, s:Scheduler; `enter_go_locals` + `collect_go_param_types`
+> + `go_bare_type`, unwrapping `*`/`pkg.`/generics), then rewrite `recv.Method()`
+> to the precise `Type::Method` at extraction so it resolves by exact qualified
+> name (single candidate, conf 0.95) instead of the fuzzy instance-method/scoring
+> cascade. **k8s: +18,031 method-call refs now resolve (299,143 → 317,174);
+> `qualified-name` is now a top resolver (34,769).** Go nodes still exactly 167,101.
+> Spot-check (≥12 ambiguous receivers): all resolve to the correct type's method
+> (`domain::Nodes`, `victim::Priority`, `PodGroupEvaluator::isPreemptionAllowed`,
+> …) — no mis-resolution. Edges 594,012 → 612,043 (103% of the TS target — the
+> type-resolved edges are MORE precise than the TS name-matcher produces, the
+> intended CBM win; still within ±5%). Other languages untouched (Go-gated). Next:
+> synthesizers (interface-impl, event-emitter, react/jsx-render) + framework resolvers.
 
 - **Hybrid extractor model (CBM breadth × CG depth)** — a generic
   node-type-table-driven core (`extraction/engine.rs`, exists) driven by
