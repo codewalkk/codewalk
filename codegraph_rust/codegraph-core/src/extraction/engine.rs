@@ -69,6 +69,9 @@ struct Engine<'a> {
     /// Function-as-value candidates (#756): (candidate, from-node-id). Gated and
     /// flushed to `function_ref` refs after the walk, when the file is complete.
     fn_refs: Vec<(crate::extraction::fn_ref::FnRefCandidate, String)>,
+    /// Generated file (path-based) — function-ref capture is skipped entirely
+    /// (its candidates are noise), computed once instead of per-flush.
+    is_generated: bool,
 }
 
 /// Parse and extract one source file. Returns an empty-but-ok result (with an
@@ -121,6 +124,7 @@ pub fn extract_file(file_path: &str, source: &str, language: Language) -> Extrac
         scopes: Vec::new(),
         updated_at: 0,
         fn_refs: Vec::new(),
+        is_generated: crate::search::query_utils::is_generated_file(file_path),
     };
     engine.run(tree.root_node());
 
@@ -166,6 +170,9 @@ impl<'a> Engine<'a> {
     /// Capture function-as-value candidates from a dispatched container node,
     /// attributed to the current scope.
     fn maybe_capture_fn_refs(&mut self, node: TsNode<'_>) {
+        if self.is_generated {
+            return; // candidates would be discarded at flush anyway
+        }
         let Some(rule) = crate::extraction::fn_ref::dispatch_rule(self.language, node.kind()) else {
             return;
         };
@@ -174,6 +181,29 @@ impl<'a> Engine<'a> {
         };
         for cand in crate::extraction::fn_ref::capture_candidates(node, &rule, self.language, self.source) {
             self.fn_refs.push((cand, from.clone()));
+        }
+    }
+
+    /// Scan a value subtree the main walkers skip (object-literal initializers)
+    /// for function-as-value candidates, halting at nested function defs (their
+    /// bodies are captured by `extract_function`). Port of `scanFnRefSubtree`.
+    fn scan_fn_ref_subtree(&mut self, node: TsNode<'_>, depth: u32) {
+        if self.is_generated || depth > 12 {
+            return;
+        }
+        if depth > 0 {
+            let k = node.kind();
+            if self.extractor.function_types().contains(&k)
+                || matches!(k, "arrow_function" | "function_expression")
+            {
+                return;
+            }
+        }
+        self.maybe_capture_fn_refs(node);
+        for i in 0..node.named_child_count() {
+            if let Some(c) = node.named_child(i) {
+                self.scan_fn_ref_subtree(c, depth + 1);
+            }
         }
     }
 
@@ -186,9 +216,6 @@ impl<'a> Engine<'a> {
             return;
         }
         let candidates = std::mem::take(&mut self.fn_refs);
-        if crate::search::query_utils::is_generated_file(self.file_path) {
-            return;
-        }
         let defined_here: std::collections::HashSet<&str> = self
             .nodes
             .iter()
@@ -204,12 +231,11 @@ impl<'a> Engine<'a> {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut refs: Vec<UnresolvedReference> = Vec::new();
         for (c, from) in &candidates {
-            // `this.<member>` always flushes (resolution is class-scoped); a bare
-            // name must be defined-here or imported.
-            if !c.name.starts_with("this.")
-                && !defined_here.contains(c.name.as_str())
-                && !imported.contains(c.name.as_str())
-            {
+            // Gate: a name must be a function/method defined in this file or one
+            // this file imports. (`this.<member>` forms can't resolve by bare-name
+            // matching — no class-scoped fn-ref resolver is ported — so they fall
+            // out here rather than becoming orphan refs.)
+            if !defined_here.contains(c.name.as_str()) && !imported.contains(c.name.as_str()) {
                 continue;
             }
             let key = format!("{}|{}", from, c.name);
@@ -790,6 +816,15 @@ impl<'a> Engine<'a> {
             if let Some(obj) = object_of_fns {
                 if extract_object_methods {
                     self.extract_object_literal_functions(obj);
+                }
+            }
+            // Object-literal handler tables (`const h = { click: onClick }`): the
+            // identifier function-values are fn-ref candidates the main walker
+            // skipped (object isn't visit_function_body-walked, and visit_node set
+            // skip_children) — scan the object subtree for them.
+            if let Some(v) = value {
+                if matches!(v.kind(), "object" | "object_expression") {
+                    self.scan_fn_ref_subtree(v, 0);
                 }
             }
         }

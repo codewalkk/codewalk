@@ -423,7 +423,18 @@ pub fn match_function_ref(graph: &Graph, r: &UnresolvedReference) -> Option<Reso
         .filter(|&i| graph.node(i).file_path == file(r))
         .collect();
     if !same_file.is_empty() {
-        let target = *same_file.iter().min_by_key(|&&i| graph.node(i).start_line).unwrap();
+        // First by start line; id breaks ties so the pick is reproducible
+        // regardless of node-insertion order (determinism gate).
+        let target = *same_file
+            .iter()
+            .min_by(|&&a, &&b| {
+                graph
+                    .node(a)
+                    .start_line
+                    .cmp(&graph.node(b).start_line)
+                    .then_with(|| graph.node(a).id.cmp(&graph.node(b).id))
+            })
+            .unwrap();
         return Some(Resolved {
             target_id: graph.node(target).id.clone(),
             confidence: if same_file.len() == 1 { 0.95 } else { 0.90 },
@@ -446,17 +457,9 @@ fn apply_language_gate(graph: &Graph, cands: &[usize], r: &UnresolvedReference) 
     use crate::types::{EdgeKind, ReferenceKind};
     let l = lang(r);
     match r.reference_kind {
-        // A function-as-value matches function/method nodes ONLY (matchFunctionRef),
-        // within the same language family.
-        ReferenceKind::FunctionRef => cands
-            .iter()
-            .copied()
-            .filter(|&i| {
-                let n = graph.node(i);
-                matches!(n.kind, NodeKind::Function | NodeKind::Method)
-                    && same_language_family(n.language, l)
-            })
-            .collect(),
+        // `function_ref` is resolved entirely by `match_function_ref` (intercepted
+        // in resolve_one), so it never reaches here — only plain `references`
+        // (type-annotation/usage) refs get the same-language-family filter.
         ReferenceKind::Edge(EdgeKind::References) => cands
             .iter()
             .copied()
