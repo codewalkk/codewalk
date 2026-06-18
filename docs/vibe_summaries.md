@@ -1,3 +1,43 @@
+● Rust extractor done and merged (19534f7).
+
+  M4d — Rust extractor
+
+  Fourth language via the hybrid model — and the cleanest parity yet:
+  - languages/rust.rs + engine handling for Rust's idioms: impl-method receivers (get_receiver_type walks to the enclosing impl, so impl Foo { fn bar() } → method Foo::bar), enum variants
+  (enum_member dispatch, gated so it's a no-op for the other languages), const/static/let variables, use-tree root-module imports, and normalized return types (-> Self/-> &Foo/-> Vec<Foo>) for
+  chained-receiver inference.
+  - Grammar tree-sitter-rust 0.24 (ABI-compatible).
+  - Matched a TS quirk for parity: Rust const/static extract as variable (the TS rust extractor sets no isConst) — PORT, don't invent.
+  
+  Parity (our own codegraph-core/src, 26 files)
+
+  ┌────────────────────────────────────────────────────────────────────┬───────┬───────┬─────────────────────┐
+  │                                                                    │  TS   │ Rust  │                     │
+  ├────────────────────────────────────────────────────────────────────┼───────┼───────┼─────────────────────┤
+  │ nodes                                                              │ 628   │ 634   │ 101.0% (within ±5%) │                                                
+  ├────────────────────────────────────────────────────────────────────┼───────┼───────┼─────────────────────┤
+  │ method / function / enum_member / struct / enum / trait / variable │ —     │ —     │ all exact           │
+  ├────────────────────────────────────────────────────────────────────┼───────┼───────┼─────────────────────┤
+  │ edges                                                              │ 1,962 │ 1,802 │ 92%                 │
+  ├────────────────────────────────────────────────────────────────────┼───────┼───────┼─────────────────────┤
+  │ references                                                         │ 216   │ 210   │ 97%                 │                                                
+  ├────────────────────────────────────────────────────────────────────┼───────┼───────┼─────────────────────┤
+  │ instantiates                                                       │ 84    │ 84    │ EXACT               │
+  ├────────────────────────────────────────────────────────────────────┼───────┼───────┼─────────────────────┤
+  │ calls                                                              │ 689   │ 672   │ 97%                 │
+  └────────────────────────────────────────────────────────────────────┴───────┴───────┴─────────────────────┘
+  
+  Rust's typed AST lands type references as type_identifier, so the type-reference gap that affects TS/Python mostly closes here. The only real gap is per-symbol use resolution (imports −143).
+  Other languages unaffected (the one shared dispatch line gates to empty for them).
+
+  Where M4 stands
+                                                                                                                                                              
+  Five languages now extract with node parity exact-to-±1%: Go, TS/TSX, JS/JSX, Python, Rust. Edge parity: Go ~100%, Rust 92%, Python 93%, TS 89%. The one consistent follow-on is resolution 
+  completeness — per-symbol import resolution + type-reference coverage for the identifier-typed languages.
+
+  main is now 13 commits ahead of origin/main (unpushed). Per your "in order," the next items are: the resolution-completeness pass (close the edge gap to ±5% across TS/Python), then the Go 
+  type-resolution pass (the biggest CBM precision lever). Want me to continue with the resolution-completeness pass next?             
+------------------------------------------------------------------------------------------------------------------------
 ● Both docs are in place and every cross-reference + TS-spec path resolves. Here's what I created in codewalk_rust/docs/.
 
   rust-build-plan.md — how/when to build it

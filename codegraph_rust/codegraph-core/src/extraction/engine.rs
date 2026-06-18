@@ -196,6 +196,15 @@ impl<'a> Engine<'a> {
             skip_children = true;
         } else if ex.enum_member_types().contains(&kind) && self.is_inside_enum() {
             self.extract_enum_member(node);
+        } else if matches!(kind, "property_signature" | "method_signature")
+            && self.is_inside_class_like()
+        {
+            // TS interface members carry type annotations (`foo: T`, `m(a: A): R`)
+            // the interface walker would otherwise drop — emit them as `references`
+            // from the interface. Children still traversed (nested signatures).
+            if let Some(parent) = self.scopes.last().map(|s| s.id.clone()) {
+                self.extract_type_annotations(node, &parent);
+            }
         } else if ex.import_types().contains(&kind) {
             self.extract_import(node);
         } else if ex.call_types().contains(&kind) {
@@ -591,7 +600,12 @@ impl<'a> Engine<'a> {
                     is_exported,
                     ..Default::default()
                 };
-                self.create_node(NodeKind::TypeAlias, &name, node, extra);
+                if let Some(id) = self.create_node(NodeKind::TypeAlias, &name, node, extra) {
+                    // `type X = Foo | Bar<Baz>` → references to the RHS types.
+                    if let Some(value) = child_by_field(node, "value") {
+                        self.extract_type_refs_from_subtree(value, &id);
+                    }
+                }
                 false
             }
         }
@@ -1030,6 +1044,31 @@ impl<'a> Engine<'a> {
     /// Namespace imports (`* as ns`) are skipped (they bind no single symbol).
     fn imported_symbol_names(&self, node: TsNode<'_>) -> Vec<String> {
         let mut out = Vec::new();
+        // Python `from module import a, b as c` — the imported names (the original,
+        // not the alias). `module_name` is skipped; `import *` binds nothing.
+        if node.kind() == "import_from_statement" {
+            let module_id = child_by_field(node, "module_name").map(|m| m.id());
+            for i in 0..node.named_child_count() {
+                let Some(c) = node.named_child(i) else { continue };
+                if Some(c.id()) == module_id {
+                    continue;
+                }
+                let name_node = match c.kind() {
+                    "dotted_name" | "identifier" => Some(c),
+                    "aliased_import" => find_child_by_types(c, &["dotted_name", "identifier"]),
+                    _ => None, // wildcard_import
+                };
+                if let Some(nn) = name_node {
+                    // Last segment (`a.b` → `b`) is the bound name.
+                    let t = node_text(nn, self.source).trim();
+                    let last = t.rsplit('.').next().unwrap_or(t);
+                    if !last.is_empty() {
+                        out.push(last.to_string());
+                    }
+                }
+            }
+            return out;
+        }
         let Some(clause) = find_child_by_types(node, &["import_clause"]) else {
             return out;
         };
@@ -1306,6 +1345,13 @@ impl<'a> Engine<'a> {
         {
             self.extract_type_refs_from_subtree(result, from_id);
         }
+        // Direct type annotation — class fields / property signatures
+        // (`foo: Bar`), where the type isn't under params/return.
+        if let Some(ty) =
+            child_by_field(node, "type").or_else(|| find_child_by_types(node, &["type_annotation"]))
+        {
+            self.extract_type_refs_from_subtree(ty, from_id);
+        }
     }
 
     /// Recurse a type-position subtree, emitting a `references` ref per non-builtin
@@ -1363,6 +1409,22 @@ impl<'a> Engine<'a> {
         if ex.interface_types().contains(&kind) {
             self.extract_interface(body);
             return;
+        }
+
+        // Body-local typed declarations (`const x: Foo = …`): the locals aren't
+        // nodes, but the annotated TYPE is a real dependency of the enclosing
+        // function — emit a `references` edge to it (port of the visitFunctionBody
+        // `variable_declarator` path; the TS rust extractor deliberately does NOT
+        // cover Rust's `let_declaration`, so neither do we — parity). Falls through
+        // to recursion so the initializer's calls are still walked.
+        if kind == "variable_declarator" {
+            if let Some(owner) = self.scopes.last().map(|s| s.id.clone()) {
+                if let Some(ty) =
+                    child_by_field(body, "type").or_else(|| find_child_by_types(body, &["type_annotation"]))
+                {
+                    self.extract_type_refs_from_subtree(ty, &owner);
+                }
+            }
         }
 
         for i in 0..body.named_child_count() {

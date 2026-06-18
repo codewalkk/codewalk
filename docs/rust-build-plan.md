@@ -347,6 +347,26 @@ banner above).
 > **Four languages now extract; node parity is exact-to-±1% on all four** (Go,
 > TS/JS, Python, Rust). The consistent edge follow-on is per-symbol import
 > resolution + type-ref completeness for the `identifier`-typed languages.
+>
+> **M4e done: resolution-completeness pass.** Closed the TS reference gap and
+> generalized import resolution. Type-reference completeness (engine): body-local
+> typed declarations (`const x: Foo` → a `references` edge from the enclosing
+> function, port of the `visitFunctionBody` `variable_declarator` path — TS/JS
+> only, matching the spec which omits Rust `let`); TS interface/property-signature
+> member types; a direct type-annotation field in `extract_type_annotations`
+> (class fields); type-alias RHS types. Import resolution (`import_resolver.rs`):
+> generalized to **Python** — relative `from .mod import X` → X's def, and
+> `from . import sub` → the submodule **file** node (the file→file import edges).
+> **Edge parity now within ±5% on TS and Python:** TS 89% → **97.4%** (references
+> 54% → 97%: interface/class/property exact, function/method near-exact), Python
+> 93% → **95.6%** (imports 69% → 96%). Rust holds at 91.8% — its one gap is
+> per-symbol `use` resolution (the most complex module system; deferred).
+> Remaining cross-language follow-ons: the **function-ref** mechanism
+> (`functionRefProducers` — Python's `references` are callback values, not type
+> annotations) and Rust `use`-tree resolution. Go/Rust re-verified unchanged.
+
+> **Edge-parity scoreboard (vs TS CodeGraph): Go ~100%, TS 97.4%, Python 95.6%,
+> Rust 91.8%; node parity exact-to-±1% on all four.**
 
 - **Hybrid extractor model (CBM breadth × CG depth)** — a generic
   node-type-table-driven core (`extraction/engine.rs`, exists) driven by

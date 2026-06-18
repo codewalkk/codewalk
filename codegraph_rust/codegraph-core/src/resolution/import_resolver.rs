@@ -15,8 +15,30 @@ fn extensions_for(lang: Language) -> &'static [&'static str] {
         Language::Tsx => &[".tsx", ".ts", ".d.ts", ".js", ".jsx", "/index.tsx", "/index.ts", "/index.js"],
         Language::Javascript => &[".js", ".jsx", ".mjs", ".cjs", "/index.js", "/index.jsx"],
         Language::Jsx => &[".jsx", ".js", "/index.jsx", "/index.js"],
+        Language::Python => &[".py", "/__init__.py"],
         _ => &[],
     }
+}
+
+/// Translate a Python dotted-relative module (`.models`, `..pkg.mod`) into a
+/// repo-relative base path. Leading dots are package levels (1 = current dir);
+/// the remainder is a dotted submodule (`sub.mod` → `sub/mod`). Port of the
+/// Python branch of `resolveRelativeImport`. Returns `None` for absolute imports.
+fn resolve_python_base(module: &str, from_dir: &str) -> Option<String> {
+    if !module.starts_with('.') {
+        return None; // absolute import — needs the package root; skipped
+    }
+    let dots = module.len() - module.trim_start_matches('.').len();
+    let rest = module[dots..].replace('.', "/");
+    let mut parts: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
+    // 1 dot = current dir; each extra dot pops one package level.
+    for _ in 0..dots.saturating_sub(1) {
+        parts.pop();
+    }
+    for seg in rest.split('/').filter(|s| !s.is_empty()) {
+        parts.push(seg);
+    }
+    Some(parts.join("/"))
 }
 
 /// Lexically resolve `module` (a `.`/`..`-relative specifier) against `from_dir`
@@ -47,7 +69,11 @@ fn resolve_relative_base(module: &str, from_dir: &str) -> Option<String> {
 /// `resolveRelativeImport`, TS/JS path): try `base+ext` for each extension,
 /// then `base` as-is.
 fn resolve_relative_import(module: &str, from_dir: &str, lang: Language, g: &Graph) -> Option<String> {
-    let base = resolve_relative_base(module, from_dir)?;
+    let base = if lang == Language::Python {
+        resolve_python_base(module, from_dir)?
+    } else {
+        resolve_relative_base(module, from_dir)?
+    };
     for ext in extensions_for(lang) {
         let cand = format!("{}{}", base, ext);
         if g.file_indexed(&cand) {
@@ -74,12 +100,38 @@ pub fn resolve_ts_import(g: &Graph, r: &UnresolvedReference) -> Option<Resolved>
     let lang = r.language?;
     if !matches!(
         lang,
-        Language::Typescript | Language::Tsx | Language::Javascript | Language::Jsx
+        Language::Typescript
+            | Language::Tsx
+            | Language::Javascript
+            | Language::Jsx
+            | Language::Python
     ) {
         return None;
     }
     let module = r.candidates.as_ref().and_then(|c| c.first())?;
     let from_dir = dirname(r.file_path.as_deref().unwrap_or(""));
+
+    // Python submodule import: `from . import events` / `from .pkg import sub`
+    // binds a SUBMODULE, not a symbol — resolve `module.name` to its file and
+    // target that file node (TS's file→file import edges).
+    if lang == Language::Python {
+        let submod = if module.ends_with('.') {
+            format!("{}{}", module, r.reference_name)
+        } else {
+            format!("{}.{}", module, r.reference_name)
+        };
+        if let Some(file) = resolve_relative_import(&submod, from_dir, lang, g) {
+            let file_id = format!("file:{}", file);
+            if g.node_by_id(&file_id).is_some() {
+                return Some(Resolved {
+                    target_id: file_id,
+                    confidence: ladder::IMPORT_MAP,
+                    resolved_by: "import",
+                });
+            }
+        }
+    }
+
     let target_file = resolve_relative_import(module, from_dir, lang, g)?;
     // Find a node named `reference_name` in the resolved file; prefer an exported one.
     let mut fallback: Option<&str> = None;
