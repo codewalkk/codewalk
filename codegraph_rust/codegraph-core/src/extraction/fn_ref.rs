@@ -287,6 +287,21 @@ const handlers = { click: onClick };
     }
 
     #[test]
+    fn ts_object_handler_table_captured() {
+        // A top-level object handler-table (identifier values) is scanned even
+        // though the object subtree is skipped by the main walker (scanFnRefSubtree).
+        let src = r#"
+function onClick() {}
+function onHover() {}
+export const handlers = { click: onClick, hover: onHover };
+"#;
+        let r = extract_file("h.ts", src, Language::Typescript);
+        let refs = fn_refs(&r);
+        assert!(refs.contains(&"onClick"), "object-table fn_refs: {:?}", refs);
+        assert!(refs.contains(&"onHover"), "object-table fn_refs: {:?}", refs);
+    }
+
+    #[test]
     fn python_callback_captured() {
         let src = r#"
 def worker():
