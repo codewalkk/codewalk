@@ -367,6 +367,20 @@ banner above).
 
 > **Edge-parity scoreboard (vs TS CodeGraph): Go ~100%, TS 97.4%, Python 95.6%,
 > Rust 91.8%; node parity exact-to-±1% on all four.**
+>
+> **M4f done: function-ref mechanism (#756).** Function names used as VALUES
+> (callbacks passed as args, assigned to fields, in handler tables) → `function_ref`
+> candidates → gated (name must be a function/method defined-here or imported) →
+> resolved to function/method nodes via `match_function_ref` (bare-fn-only for
+> TS/JS/Python; same-file-wins, else cross-file unique-or-drop), emitted as
+> `references` edges. New `extraction/fn_ref.rs` (per-language capture specs +
+> normalize, Go/TS/JS/Python/Rust); capture runs in `visit_node` + `visit_function_body`,
+> flushed at end-of-file. **References now at parity: Python 47/47 and Rust 216/216
+> EXACT, TS 2,084/2,109 (98.8%).** Edge totals: TS 97.6%, Python 96.8%, Rust 92.2%.
+> Go (k8s): nodes still exactly 167,101; edges 592,456 → 594,012 (the Go indirect-call
+> edges k8s's handler/plugin registrations produce) — 100.3% of the TS target, within
+> ±5%. **Updated scoreboard: Go ~100%, TS 97.6%, Python 96.8%, Rust 92.2%.** The last
+> sub-gate gap is Rust per-symbol `use` resolution; everything else is within ±5%.
 
 - **Hybrid extractor model (CBM breadth × CG depth)** — a generic
   node-type-table-driven core (`extraction/engine.rs`, exists) driven by

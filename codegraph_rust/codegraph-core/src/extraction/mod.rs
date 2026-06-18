@@ -7,6 +7,7 @@
 
 pub mod engine;
 pub mod extractor;
+pub mod fn_ref;
 pub mod grammars;
 pub mod languages;
 

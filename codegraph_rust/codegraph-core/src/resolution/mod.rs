@@ -93,6 +93,12 @@ fn resolve_one(g: &Graph, r: &UnresolvedReference) -> Option<Resolved> {
     if r.reference_kind == ReferenceKind::Edge(EdgeKind::Imports) && r.candidates.is_some() {
         return import_resolver::resolve_ts_import(g, r);
     }
+    // Function-as-value (#756): same-file-wins / unique-or-drop, function/method
+    // targets only — its own resolver, not the generic best-match cascade (which
+    // would over-resolve high-fan-out callback names cross-file).
+    if r.reference_kind == ReferenceKind::FunctionRef {
+        return name_matcher::match_function_ref(g, r);
+    }
     if builtins::is_builtin_or_external(g, r) {
         return None;
     }
