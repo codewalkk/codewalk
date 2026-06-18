@@ -381,6 +381,23 @@ banner above).
 > edges k8s's handler/plugin registrations produce) — 100.3% of the TS target, within
 > ±5%. **Updated scoreboard: Go ~100%, TS 97.6%, Python 96.8%, Rust 92.2%.** The last
 > sub-gate gap is Rust per-symbol `use` resolution; everything else is within ±5%.
+>
+> **M4g done: Rust `use`-tree resolution.** Extraction emits one `imports` ref per
+> use-leaf named by its full scoped path (`use crate::types::{Node, Edge}` →
+> `crate::types::Node` + `crate::types::Edge`; port of `emitRustUseBindingRefs`).
+> Resolution (`import_resolver::resolve_rust_path`) maps the module path to a file
+> via the Rust module system — `crate::` → crate-root dir (nearest `lib.rs`/`main.rs`
+> ancestor), `self::`/`super::` → module dir, bare → self-then-crate-relative; each
+> segment → `<seg>.rs` or `<seg>/mod.rs` — then finds the leaf definition in that
+> file (port of `resolveRustPathReference`/`resolveRustModuleFile`). **Rust edges
+> 92.2% → 99.7%** (imports 109 → 258; references/instantiates exact). Other languages
+> untouched (Rust-gated).
+>
+> **FINAL M4-extractor scoreboard — all five languages within ±5% on BOTH nodes and
+> edges: Go ~100%, TS 97.6%, Python 96.8%, Rust 99.7%.** Node parity exact-to-±1%
+> throughout. The breadth+resolution port (extractors + import/type/function-ref
+> resolution) is complete for Go/TS/JS/Python/Rust. Next: the Go type-resolution
+> pass (the biggest CBM precision lever), then synthesizers + framework resolvers.
 
 - **Hybrid extractor model (CBM breadth × CG depth)** — a generic
   node-type-table-driven core (`extraction/engine.rs`, exists) driven by

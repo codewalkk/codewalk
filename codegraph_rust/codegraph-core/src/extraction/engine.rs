@@ -1063,19 +1063,25 @@ impl<'a> Engine<'a> {
             // External modules (`fs`, `commander`) carry a non-relative specifier
             // that the import resolver declines, so they create no edge.
             if let Some(pid) = parent_id {
-                let line = node.start_position().row as u32 + 1;
-                let col = node.start_position().column as u32;
-                for name in self.imported_symbol_names(node) {
-                    self.unresolved.push(UnresolvedReference {
-                        from_node_id: pid.clone(),
-                        reference_name: name,
-                        reference_kind: ReferenceKind::Edge(EdgeKind::Imports),
-                        line,
-                        col,
-                        file_path: Some(self.file_path.to_string()),
-                        language: Some(self.language),
-                        candidates: Some(vec![module.clone()]),
-                    });
+                if self.language == Language::Rust {
+                    // Rust use-tree → one Imports ref per leaf, named by its FULL
+                    // scoped path (`crate::types::Node`) for path-based resolution.
+                    self.emit_rust_use_bindings(node, &pid);
+                } else {
+                    let line = node.start_position().row as u32 + 1;
+                    let col = node.start_position().column as u32;
+                    for name in self.imported_symbol_names(node) {
+                        self.unresolved.push(UnresolvedReference {
+                            from_node_id: pid.clone(),
+                            reference_name: name,
+                            reference_kind: ReferenceKind::Edge(EdgeKind::Imports),
+                            line,
+                            col,
+                            file_path: Some(self.file_path.to_string()),
+                            language: Some(self.language),
+                            candidates: Some(vec![module.clone()]),
+                        });
+                    }
                 }
             }
             return;
@@ -1149,6 +1155,78 @@ impl<'a> Engine<'a> {
                     spec,
                 );
             }
+        }
+    }
+
+    /// Rust `use` tree → one `imports` ref per leaf, named by its full scoped
+    /// path (`crate::types::{Node, Edge}` → `crate::types::Node`, `crate::types::Edge`).
+    /// Port of `emitRustUseBindingRefs`. Leaves that are only self/super/crate/* are skipped.
+    fn emit_rust_use_bindings(&mut self, node: TsNode<'_>, from: &str) {
+        let mut paths: Vec<(String, TsNode)> = Vec::new();
+        for i in 0..node.named_child_count() {
+            if let Some(c) = node.named_child(i) {
+                self.collect_rust_use_paths(c, "", &mut paths);
+            }
+        }
+        for (path, n) in paths {
+            let leaf = path.rsplit("::").next().unwrap_or(&path);
+            if matches!(leaf, "self" | "super" | "crate" | "*") || leaf.is_empty() {
+                continue;
+            }
+            self.unresolved.push(UnresolvedReference {
+                from_node_id: from.to_string(),
+                reference_name: path.clone(),
+                reference_kind: ReferenceKind::Edge(EdgeKind::Imports),
+                line: n.start_position().row as u32 + 1,
+                col: n.start_position().column as u32,
+                file_path: Some(self.file_path.to_string()),
+                language: Some(self.language),
+                candidates: None,
+            });
+        }
+    }
+
+    /// Walk a Rust use-tree, accumulating each leaf's full scoped path.
+    fn collect_rust_use_paths<'n>(
+        &self,
+        n: TsNode<'n>,
+        prefix: &str,
+        out: &mut Vec<(String, TsNode<'n>)>,
+    ) {
+        let join = |p: &str, seg: &str| if p.is_empty() { seg.to_string() } else { format!("{}::{}", p, seg) };
+        match n.kind() {
+            "identifier" => out.push((join(prefix, node_text(n, self.source)), n)),
+            "scoped_identifier" => {
+                let full = node_text(n, self.source).trim().to_string();
+                let text = if prefix.is_empty() { full } else { format!("{}::{}", prefix, full) };
+                out.push((text, n));
+            }
+            "scoped_use_list" => {
+                let seg = child_by_field(n, "path").map(|p| node_text(p, self.source).trim().to_string());
+                let new_prefix = match seg {
+                    Some(s) if !s.is_empty() => join(prefix, &s),
+                    _ => prefix.to_string(),
+                };
+                let list = child_by_field(n, "list").or_else(|| find_child_by_types(n, &["use_list"]));
+                if let Some(list) = list {
+                    self.collect_rust_use_paths(list, &new_prefix, out);
+                }
+            }
+            "use_list" => {
+                for i in 0..n.named_child_count() {
+                    if let Some(c) = n.named_child(i) {
+                        self.collect_rust_use_paths(c, prefix, out);
+                    }
+                }
+            }
+            "use_as_clause" => {
+                // `Path as Alias` → link the source path (the definition), not the alias.
+                let p = child_by_field(n, "path").or_else(|| n.named_child(0));
+                if let Some(p) = p {
+                    self.collect_rust_use_paths(p, prefix, out);
+                }
+            }
+            _ => {} // use_wildcard etc.
         }
     }
 

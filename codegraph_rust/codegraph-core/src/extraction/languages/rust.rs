@@ -235,4 +235,27 @@ pub fn free_fn(x: u32) -> u32 { x }
         // method-call `compute()` staged.
         assert!(r.unresolved_references.iter().any(|u| u.reference_name == "compute"));
     }
+
+    #[test]
+    fn rust_use_bindings_full_paths() {
+        use crate::types::{EdgeKind, ReferenceKind};
+        let src = r#"
+use crate::types::{Node, Edge};
+use crate::db::Store;
+use std::collections::HashMap;
+use super::graph::Graph;
+"#;
+        let r = extract_file("src/resolution/mod.rs", src, Language::Rust);
+        let imps: Vec<&str> = r
+            .unresolved_references
+            .iter()
+            .filter(|u| u.reference_kind == ReferenceKind::Edge(EdgeKind::Imports))
+            .map(|u| u.reference_name.as_str())
+            .collect();
+        // Each use-leaf becomes an `imports` ref carrying its full scoped path.
+        assert!(imps.contains(&"crate::types::Node"), "use refs: {:?}", imps);
+        assert!(imps.contains(&"crate::types::Edge"), "use refs: {:?}", imps);
+        assert!(imps.contains(&"crate::db::Store"), "use refs: {:?}", imps);
+        assert!(imps.contains(&"super::graph::Graph"), "use refs: {:?}", imps);
+    }
 }

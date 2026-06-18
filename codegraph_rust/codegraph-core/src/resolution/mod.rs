@@ -93,6 +93,14 @@ fn resolve_one(g: &Graph, r: &UnresolvedReference) -> Option<Resolved> {
     if r.reference_kind == ReferenceKind::Edge(EdgeKind::Imports) && r.candidates.is_some() {
         return import_resolver::resolve_ts_import(g, r);
     }
+    // Rust `use crate::m::Item` — resolve the module path to its file, then the
+    // leaf to a definition (authoritative for Rust use-path imports).
+    if r.reference_kind == ReferenceKind::Edge(EdgeKind::Imports)
+        && r.language == Some(Language::Rust)
+        && r.reference_name.contains("::")
+    {
+        return import_resolver::resolve_rust_path(g, r);
+    }
     // Function-as-value (#756): same-file-wins / unique-or-drop, function/method
     // targets only — its own resolver, not the generic best-match cascade (which
     // would over-resolve high-fan-out callback names cross-file).
